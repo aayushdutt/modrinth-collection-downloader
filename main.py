@@ -36,26 +36,36 @@ modrinth_client = ModrinthClient()
 
 def parse_args():
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Download mods from Modrinth.")
-    parser.add_argument(
-        "-c", "--collection", required=True, help="ID of the collection to download."
+    parser = argparse.ArgumentParser(
+        description="Download and update mods from a Modrinth collection."
     )
-    parser.add_argument("-v", "--version", required=True, help="Minecraft version.")
+    parser.add_argument(
+        "-c",
+        "--collection",
+        required=True,
+        help="ID of the collection to download. Can be obtained from the collection URL (for https://modrinth.com/collection/5OBQuutT collection_id is 5OBQuutT).",
+    )
+    parser.add_argument(
+        "-v", "--version", required=True, help='Minecraft version ("1.20.4", "1.21").'
+    )
     parser.add_argument(
         "-l",
         "--loader",
         required=True,
-        help='Loader to use ("fabric", "forge", "quilt" etc.).',
+        help='Loader to use ("fabric", "forge", "quilt" etc).',
     )
     parser.add_argument(
-        "-d", "--directory", default="./mods", help="Directory to download mods to."
+        "-d",
+        "--directory",
+        default="./mods",
+        help='Directory to download mods to. Default: "mods"',
     )
     parser.add_argument(
         "-u",
         "--update",
         default=False,
         action="store_true",
-        help="Update existing mods.",
+        help="Download and update existing mods. Default: false",
     )
     return parser.parse_args()
 
