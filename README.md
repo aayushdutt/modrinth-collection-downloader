@@ -2,10 +2,6 @@
 
 Script to download and update mods from a Modrinth Collection
 
-## Requirements
-
-`pip install requests`
-
 ## How to use
 
 1. Clone this repository `git clone https://github.com/aayushdutt/modrinth-collection-downloader.git`
@@ -17,5 +13,5 @@ Script to download and update mods from a Modrinth Collection
 
 **Running**
 
-- `python mods.py`: Download all mods in collection (will not update existing mods).
-- `python mods.py --update`: Download and update mods to the latest version.
+- `python main.py`: Download all mods in collection (will not update existing mods).
+- `python main.py --update`: Download and update mods to the latest version.

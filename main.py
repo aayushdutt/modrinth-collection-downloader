@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
-import requests
+from urllib import request, error
 
 with open("config.json", "r") as f:
     config = json.load(f)
+
 MC_VERSION = config["mc_version"]  # "1.20.4"
 LOADER = config["loader"]  # "fabric, forge, quilt"
 COLLECTION_ID = config["collection_id"]
@@ -12,6 +13,35 @@ MOD_PATH = config["mod_path"]
 
 if not os.path.exists(MOD_PATH):
     os.mkdir(MOD_PATH)
+
+
+class ModrinthClient:
+
+    def __init__(self):
+        self.base_url = "https://api.modrinth.com"
+
+    def get(self, url):
+        try:
+            with request.urlopen(self.base_url + url) as response:
+                return json.loads(response.read())
+        except error.URLError as e:
+            print(f"Network error: {e}")
+            return None
+
+    def download_file(self, url, filename):
+        try:
+            request.urlretrieve(url, filename)
+        except error.URLError as e:
+            print(f"Failed to download file: {e}")
+
+    def get_mod_version(self, mod_id):
+        return self.get(f"/v2/project/{mod_id}/version")
+
+    def get_collection(self, collection_id):
+        return self.get(f"/v3/collection/{collection_id}")
+
+
+modrinth_client = ModrinthClient()
 
 
 def get_existing_mods() -> list[dict]:
@@ -22,13 +52,11 @@ def get_existing_mods() -> list[dict]:
     } for file_name in file_names]
 
 
-def get_latest_version(mod_id: str) -> dict | None:
-    res = requests.get(f"https://api.modrinth.com/v2/project/{mod_id}/version")
-    if not res.ok:
+def get_latest_version(mod_id):
+    mod_versions_data = modrinth_client.get_mod_version(mod_id)
+    if not mod_versions_data:
         print(f"{mod_id} versions not found!")
         return None
-
-    mod_versions_data = json.loads(res.content)
 
     mod_version_to_download = next(
         (mod_version for mod_version in mod_versions_data
@@ -37,7 +65,7 @@ def get_latest_version(mod_id: str) -> dict | None:
     return mod_version_to_download
 
 
-def download_mod(mod_id: str, update: bool = False, existing_mods: list = []):
+def download_mod(mod_id, update=False, existing_mods=[]):
     existing_mod = next((mod for mod in existing_mods if mod["id"] == mod_id),
                         None)
     if not update and existing_mod:
@@ -69,9 +97,8 @@ def download_mod(mod_id: str, update: bool = False, existing_mods: list = []):
     print("Updating: " if existing_mod else "Downloading: ",
           file_to_download['filename'], latest_mod['loaders'],
           latest_mod['game_versions'])
-    mod_file = requests.get(file_to_download["url"]).content
-    with open(f"{MOD_PATH}/{filename_with_id}", 'wb') as f:
-        f.write(mod_file)
+    modrinth_client.download_file(file_to_download["url"],
+                                  f"{MOD_PATH}/{filename_with_id}")
 
     if existing_mod:
         print(f"Removing previous version: {existing_mod['filename']}")
@@ -79,12 +106,10 @@ def download_mod(mod_id: str, update: bool = False, existing_mods: list = []):
 
 
 def main():
-    collection_res = requests.get(
-        f"https://api.modrinth.com/v3/collection/{COLLECTION_ID}")
-    if not collection_res.ok:
-        print(f"Collection not found!")
+    collection_details = modrinth_client.get_collection(COLLECTION_ID)
+    if not collection_details:
+        print(f"Collection id={COLLECTION_ID} not found")
         return
-    collection_details = json.loads(collection_res.content)
     mods: str = collection_details["projects"]
     print("Mods in collection: ", mods)
     existing_mods = get_existing_mods()
