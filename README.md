@@ -2,6 +2,10 @@
 
 Script to download and update mods from a Modrinth Collection
 
+## Requirements
+- Python should be installed: https://www.python.org/downloads/
+- (optional) `wget` or `curl`
+
 ## How to use
 
 ```sh
