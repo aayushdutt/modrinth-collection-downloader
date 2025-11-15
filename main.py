@@ -182,31 +182,91 @@ def download_mod(
     existing_mods: Dict[str, Dict[str, str]],
     stats: Dict[str, int],
     failed_mods: List[str],
+    processed_mods: Optional[set] = None,
+    is_dependency: bool = False,
+    parent_mod_id: Optional[str] = None,
 ) -> None:
     """Download or update a mod.
     
     Updates the stats dictionary with results and appends to failed_mods list on failure.
+    Also handles downloading required dependencies recursively.
+    
+    Args:
+        processed_mods: Set of mod IDs that have already been processed (to avoid circular dependencies).
+        is_dependency: Whether this mod is being downloaded as a dependency.
+        parent_mod_id: ID of the parent mod that requires this dependency (for logging).
     """
+    if processed_mods is None:
+        processed_mods = set()
+    
+    # Avoid processing the same mod twice (circular dependencies)
+    if mod_id in processed_mods:
+        return
+    
+    processed_mods.add(mod_id)
+    
+    # Prefix for dependency logging
+    dep_prefix = "  [DEPENDENCY] " if is_dependency else ""
+    
     try:
         existing_mod = existing_mods.get(mod_id)
 
         # Early skip - no need to fetch mod name
         if not update and existing_mod:
-            print(f"SKIP: {mod_id} already exists (use -u/--update to update)")
+            if is_dependency:
+                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+                print(f"{dep_prefix}SKIP: {mod_display} already exists (use -u/--update to update)")
+            else:
+                print(f"SKIP: {mod_id} already exists (use -u/--update to update)")
             stats["skipped"] += 1
+            if is_dependency:
+                stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
+            else:
+                stats["main_skipped"] = stats.get("main_skipped", 0) + 1
+            # Still process dependencies even if mod is skipped
+            latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
+            if latest_mod:
+                _process_dependencies(
+                    latest_mod, modrinth_client, directory, version, loader,
+                    update, existing_mods, stats, failed_mods, processed_mods, mod_id
+                )
             return
 
         latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
+        # import json
+        # print("=" * 50)
+        # print(f"existing_mod: {existing_mod}, latest_mod: {json.dumps(latest_mod)}")
+        # print("=" * 50)
         if not latest_mod:
             # Error case - fetch mod name for better error message
             mod_name = get_mod_name(modrinth_client, mod_id)
             mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
-            print(
-                f"ERROR: No version found for {mod_display} with MC_VERSION={version} and LOADER={loader}"
-            )
+            error_msg = f"{dep_prefix}ERROR: No version found for {mod_display} with MC_VERSION={version} and LOADER={loader}"
+            if is_dependency and parent_mod_id:
+                error_msg += f" (required by {parent_mod_id})"
+            print(error_msg)
             stats["failed"] += 1
+            if is_dependency:
+                stats["deps_failed"] = stats.get("deps_failed", 0) + 1
+            else:
+                stats["main_failed"] = stats.get("main_failed", 0) + 1
             failed_mods.append(mod_display)
             return
+
+        # Process dependencies first (before downloading the mod itself)
+        if not is_dependency:  # Only log dependency processing for main mods
+            dependencies = latest_mod.get("dependencies", [])
+            required_deps = [dep for dep in dependencies if dep.get("dependency_type") == "required"]
+            if required_deps:
+                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+                print(f"Processing {len(required_deps)} required dependency(ies) for {mod_display}...")
+        
+        _process_dependencies(
+            latest_mod, modrinth_client, directory, version, loader,
+            update, existing_mods, stats, failed_mods, processed_mods, mod_id
+        )
 
         # Find primary file
         file_to_download: Optional[dict] = next(
@@ -216,8 +276,12 @@ def download_mod(
             # Error case - fetch mod name for better error message
             mod_name = get_mod_name(modrinth_client, mod_id)
             mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
-            print(f"ERROR: Couldn't find a primary file to download for {mod_display}")
+            print(f"{dep_prefix}ERROR: Couldn't find a primary file to download for {mod_display}")
             stats["failed"] += 1
+            if is_dependency:
+                stats["deps_failed"] = stats.get("deps_failed", 0) + 1
+            else:
+                stats["main_failed"] = stats.get("main_failed", 0) + 1
             failed_mods.append(mod_display)
             return
 
@@ -227,10 +291,35 @@ def download_mod(
         filename_with_id = ".".join(filename_parts)
         file_path = os.path.join(directory, filename_with_id)
 
-        # Skip if already at latest version - no need to fetch mod name
+        # Skip if already at latest version - check both existing_mods dict and disk
         if existing_mod and existing_mod["filename"] == filename_with_id:
-            print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
+            if is_dependency:
+                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+                print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) latest version already exists")
+            else:
+                print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
             stats["skipped"] += 1
+            if is_dependency:
+                stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
+            else:
+                stats["main_skipped"] = stats.get("main_skipped", 0) + 1
+            return
+        
+        # Also check if file exists on disk with same name (might have been downloaded as a dependency)
+        # Only skip if it's the exact same version and we're not in update mode
+        if os.path.exists(file_path) and not update:
+            if is_dependency:
+                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+                print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) already exists on disk")
+            else:
+                print(f"SKIP: {mod_id} ({filename_with_id}) already exists on disk")
+            stats["skipped"] += 1
+            if is_dependency:
+                stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
+            else:
+                stats["main_skipped"] = stats.get("main_skipped", 0) + 1
             return
 
         # We're actually downloading/updating - fetch mod name for display
@@ -239,10 +328,18 @@ def download_mod(
         action = "UPDATING" if existing_mod else "DOWNLOADING"
         loaders_str = ", ".join(latest_mod.get("loaders", []))
         versions_str = ", ".join(latest_mod.get("game_versions", []))
-        print(
-            f"{action}: {mod_display} - {file_to_download['filename']} "
-            f"(loaders: {loaders_str}, versions: {versions_str})"
-        )
+        if is_dependency and parent_mod_id:
+            parent_name = get_mod_name(modrinth_client, parent_mod_id)
+            parent_display = f"{parent_name} ({parent_mod_id})" if parent_name != parent_mod_id else parent_mod_id
+            print(
+                f"{dep_prefix}{action}: {mod_display} - {file_to_download['filename']} "
+                f"(required by {parent_display}, loaders: {loaders_str}, versions: {versions_str})"
+            )
+        else:
+            print(
+                f"{dep_prefix}{action}: {mod_display} - {file_to_download['filename']} "
+                f"(loaders: {loaders_str}, versions: {versions_str})"
+            )
 
         # Download the file
         download_success = modrinth_client.download_file(
@@ -250,8 +347,12 @@ def download_mod(
         )
 
         if not download_success:
-            print(f"ERROR: Failed to download {mod_display}")
+            print(f"{dep_prefix}ERROR: Failed to download {mod_display}")
             stats["failed"] += 1
+            if is_dependency:
+                stats["deps_failed"] = stats.get("deps_failed", 0) + 1
+            else:
+                stats["main_failed"] = stats.get("main_failed", 0) + 1
             failed_mods.append(mod_display)
             return
 
@@ -261,13 +362,21 @@ def download_mod(
             try:
                 if os.path.exists(old_file_path):
                     os.remove(old_file_path)
-                    print(f"REMOVED: Previous version {existing_mod['filename']} for {mod_display}")
+                    print(f"{dep_prefix}REMOVED: Previous version {existing_mod['filename']} for {mod_display}")
             except OSError as e:
-                print(f"WARNING: Failed to remove old file {existing_mod['filename']} for {mod_display}: {e}")
+                print(f"{dep_prefix}WARNING: Failed to remove old file {existing_mod['filename']} for {mod_display}: {e}")
 
         stats["downloaded"] += 1
+        if is_dependency:
+            stats["deps_downloaded"] = stats.get("deps_downloaded", 0) + 1
+        else:
+            stats["main_downloaded"] = stats.get("main_downloaded", 0) + 1
         if existing_mod:
             stats["updated"] += 1
+            if is_dependency:
+                stats["deps_updated"] = stats.get("deps_updated", 0) + 1
+            else:
+                stats["main_updated"] = stats.get("main_updated", 0) + 1
 
     except Exception as e:
         # Error case - fetch mod name for better error message
@@ -276,9 +385,64 @@ def download_mod(
             error_mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
         except:
             error_mod_display = mod_id
-        print(f"ERROR: Failed to process {error_mod_display}: {e}")
+        print(f"{dep_prefix}ERROR: Failed to process {error_mod_display}: {e}")
         stats["failed"] += 1
+        if is_dependency:
+            stats["deps_failed"] = stats.get("deps_failed", 0) + 1
+        else:
+            stats["main_failed"] = stats.get("main_failed", 0) + 1
         failed_mods.append(error_mod_display)
+
+
+def _process_dependencies(
+    latest_mod: dict,
+    modrinth_client: ModrinthClient,
+    directory: str,
+    version: str,
+    loader: str,
+    update: bool,
+    existing_mods: Dict[str, Dict[str, str]],
+    stats: Dict[str, int],
+    failed_mods: List[str],
+    processed_mods: set,
+    parent_mod_id: str,
+) -> None:
+    """Process required dependencies for a mod version.
+    
+    Downloads/updates all required dependencies recursively.
+    
+    Args:
+        parent_mod_id: ID of the parent mod that requires these dependencies.
+    """
+    dependencies = latest_mod.get("dependencies", [])
+    required_deps = [
+        dep for dep in dependencies
+        if dep.get("dependency_type") == "required"
+    ]
+    
+    if not required_deps:
+        return
+    
+    for dep in required_deps:
+        dep_project_id = dep.get("project_id")
+        if not dep_project_id:
+            continue
+        
+        # Recursively download the dependency
+        download_mod(
+            dep_project_id,
+            modrinth_client,
+            directory,
+            version,
+            loader,
+            update,
+            existing_mods,
+            stats,
+            failed_mods,
+            processed_mods,
+            is_dependency=True,
+            parent_mod_id=parent_mod_id,
+        )
 
 
 def main():
@@ -345,12 +509,46 @@ def main():
     print("\n" + "=" * 50)
     print("SUMMARY")
     print("=" * 50)
-    print(f"Total mods processed: {len(mods)}")
-    print(f"Successfully downloaded: {stats['downloaded']}")
+    
+    # Main mods statistics
+    main_downloaded = stats.get('main_downloaded', 0)
+    main_updated = stats.get('main_updated', 0)
+    main_skipped = stats.get('main_skipped', 0)
+    main_failed = stats.get('main_failed', 0)
+    
+    print(f"\nMain Mods (from collection):")
+    print(f"  Total mods in collection: {len(mods)}")
+    print(f"  Downloaded: {main_downloaded}")
+    if main_updated > 0:
+        print(f"  Updated: {main_updated}")
+    print(f"  Skipped: {main_skipped}")
+    print(f"  Failed: {main_failed}")
+    
+    # Dependencies statistics
+    deps_downloaded = stats.get('deps_downloaded', 0)
+    deps_updated = stats.get('deps_updated', 0)
+    deps_skipped = stats.get('deps_skipped', 0)
+    deps_failed = stats.get('deps_failed', 0)
+    total_deps = deps_downloaded + deps_updated + deps_skipped + deps_failed
+    
+    if total_deps > 0:
+        print(f"\nDependencies (required by mods):")
+        print(f"  Total dependencies processed: {total_deps}")
+        print(f"  Downloaded: {deps_downloaded}")
+        if deps_updated > 0:
+            print(f"  Updated: {deps_updated}")
+        print(f"  Skipped: {deps_skipped}")
+        print(f"  Failed: {deps_failed}")
+    
+    # Overall totals
+    print(f"\nOverall Totals:")
+    print(f"  Total mods and dependencies processed: {stats['downloaded'] + stats['skipped'] + stats['failed']}")
+    print(f"  Downloaded: {stats['downloaded']}")
     if stats["updated"] > 0:
-        print(f"Updated: {stats['updated']}")
-    print(f"Skipped: {stats['skipped']}")
-    print(f"Failed: {stats['failed']}")
+        print(f"  Updated: {stats['updated']}")
+    print(f"  Skipped: {stats['skipped']}")
+    print(f"  Failed: {stats['failed']}")
+    
     if failed_mods:
         print("\nFailed mods:")
         for mod in failed_mods:
