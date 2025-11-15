@@ -2,36 +2,57 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+from typing import Optional, Dict, List
 from urllib import request, error
 
 
 class ModrinthClient:
+    """Client for interacting with the Modrinth API."""
 
     def __init__(self):
         self.base_url = "https://api.modrinth.com"
 
-    def get(self, url):
+    def get(self, url: str) -> Optional[dict]:
+        """Make a GET request to the Modrinth API."""
         try:
             with request.urlopen(self.base_url + url) as response:
                 return json.loads(response.read())
         except error.URLError as e:
             print(f"Network error: {e}")
             return None
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON response: {e}")
+            return None
 
-    def download_file(self, url, filename):
+    def download_file(self, url: str, filename: str) -> bool:
+        """Download a file from the given URL to the specified filename.
+        
+        Returns True if download succeeded, False otherwise.
+        """
         try:
             request.urlretrieve(url, filename)
+            # Verify file was created and has content
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return True
+            return False
         except error.URLError as e:
             print(f"Failed to download file: {e}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error during download: {e}")
+            return False
 
-    def get_mod_version(self, mod_id):
+    def get_mod_project(self, mod_id: str) -> Optional[dict]:
+        """Get project details for a mod (includes name, slug, etc.)."""
+        return self.get(f"/v2/project/{mod_id}")
+
+    def get_mod_version(self, mod_id: str) -> Optional[List[dict]]:
+        """Get all versions for a mod."""
         return self.get(f"/v2/project/{mod_id}/version")
 
-    def get_collection(self, collection_id):
+    def get_collection(self, collection_id: str) -> Optional[dict]:
+        """Get collection details by ID."""
         return self.get(f"/v3/collection/{collection_id}")
-
-
-modrinth_client = ModrinthClient()
 
 
 def parse_args():
@@ -70,97 +91,271 @@ def parse_args():
     return parser.parse_args()
 
 
-args = parse_args()
+def validate_directory(directory: str) -> bool:
+    """Validate that the directory path is valid and create if needed.
+    
+    Returns True if directory is valid, False otherwise.
+    """
+    if os.path.exists(directory):
+        if not os.path.isdir(directory):
+            print(f"Error: '{directory}' exists but is not a directory")
+            return False
+    else:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as e:
+            print(f"Error: Failed to create directory '{directory}': {e}")
+            return False
+    return True
 
-if args.directory:
-    if not os.path.exists(args.directory):
-        os.mkdir(args.directory)
+
+def get_existing_mods(directory: str) -> Dict[str, Dict[str, str]]:
+    """Get existing mods from the directory.
+    
+    Returns a dictionary mapping mod_id to mod info dict.
+    Handles edge cases like files without extensions or unusual names.
+    """
+    if not os.path.exists(directory):
+        return {}
+    
+    existing_mods: Dict[str, Dict[str, str]] = {}
+    try:
+        for item in os.listdir(directory):
+            item_path = os.path.join(directory, item)
+            # Only process files, skip directories
+            if not os.path.isfile(item_path):
+                continue
+            
+            # Extract mod_id from filename
+            # Format: filename.modid.ext or filename.modid
+            parts = item.rsplit(".", 2)
+            if len(parts) >= 2:
+                # Has at least one dot, mod_id should be second-to-last part
+                mod_id = parts[-2]
+                existing_mods[mod_id] = {"id": mod_id, "filename": item}
+            else:
+                # No extension, skip or handle differently
+                # For now, we'll skip files without proper format
+                continue
+    except OSError as e:
+        print(f"Warning: Failed to read directory '{directory}': {e}")
+    
+    return existing_mods
 
 
-def get_existing_mods() -> list[dict]:
-    file_names = os.listdir(args.directory)
-    return [
-        {"id": file_name.split(".")[-2], "filename": file_name}
-        for file_name in file_names
-    ]
+def get_mod_name(modrinth_client: ModrinthClient, mod_id: str) -> str:
+    """Get the mod name (title or slug) for display purposes."""
+    project_data = modrinth_client.get_mod_project(mod_id)
+    if project_data:
+        # Prefer title, fallback to slug, fallback to mod_id
+        return project_data.get("title") or project_data.get("slug") or mod_id
+    return mod_id
 
 
-def get_latest_version(mod_id):
+def get_latest_version(
+    modrinth_client: ModrinthClient, mod_id: str, version: str, loader: str
+) -> Optional[dict]:
+    """Get the latest version of a mod matching the specified version and loader."""
     mod_versions_data = modrinth_client.get_mod_version(mod_id)
     if not mod_versions_data:
-        print(f"{mod_id} versions not found!")
         return None
 
     mod_version_to_download = next(
         (
             mod_version
             for mod_version in mod_versions_data
-            if args.version in mod_version["game_versions"]
-            and args.loader in mod_version["loaders"]
+            if version in mod_version.get("game_versions", [])
+            and loader in mod_version.get("loaders", [])
         ),
         None,
     )
     return mod_version_to_download
 
 
-def download_mod(mod_id, existing_mods=[]):
+def download_mod(
+    mod_id: str,
+    modrinth_client: ModrinthClient,
+    directory: str,
+    version: str,
+    loader: str,
+    update: bool,
+    existing_mods: Dict[str, Dict[str, str]],
+    stats: Dict[str, int],
+    failed_mods: List[str],
+) -> None:
+    """Download or update a mod.
+    
+    Updates the stats dictionary with results and appends to failed_mods list on failure.
+    """
     try:
-        existing_mod = next((mod for mod in existing_mods if mod["id"] == mod_id), None)
+        existing_mod = existing_mods.get(mod_id)
 
-        if not args.update and existing_mod:
-            print(f"{mod_id} already exists, skipping...")
+        # Early skip - no need to fetch mod name
+        if not update and existing_mod:
+            print(f"SKIP: {mod_id} already exists (use -u/--update to update)")
+            stats["skipped"] += 1
             return
 
-        latest_mod = get_latest_version(mod_id)
+        latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
         if not latest_mod:
+            # Error case - fetch mod name for better error message
+            mod_name = get_mod_name(modrinth_client, mod_id)
+            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
             print(
-                f"No version found for {mod_id} with MC_VERSION={args.version} and LOADER={args.loader}"
+                f"ERROR: No version found for {mod_display} with MC_VERSION={version} and LOADER={loader}"
             )
+            stats["failed"] += 1
+            failed_mods.append(mod_display)
             return
 
-        file_to_download: dict | None = next(
-            (file for file in latest_mod["files"] if file["primary"] == True), None
+        # Find primary file
+        file_to_download: Optional[dict] = next(
+            (file for file in latest_mod.get("files", []) if file.get("primary")), None
         )
         if not file_to_download:
-            print(f"Couldn't find a file to download for {mod_id}")
+            # Error case - fetch mod name for better error message
+            mod_name = get_mod_name(modrinth_client, mod_id)
+            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+            print(f"ERROR: Couldn't find a primary file to download for {mod_display}")
+            stats["failed"] += 1
+            failed_mods.append(mod_display)
             return
+
         filename: str = file_to_download["filename"]
         filename_parts = filename.split(".")
         filename_parts.insert(-1, mod_id)
         filename_with_id = ".".join(filename_parts)
+        file_path = os.path.join(directory, filename_with_id)
 
+        # Skip if already at latest version - no need to fetch mod name
         if existing_mod and existing_mod["filename"] == filename_with_id:
-            print(f"{filename_with_id} latest version already exists.")
+            print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
+            stats["skipped"] += 1
             return
 
+        # We're actually downloading/updating - fetch mod name for display
+        mod_name = get_mod_name(modrinth_client, mod_id)
+        mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+        action = "UPDATING" if existing_mod else "DOWNLOADING"
+        loaders_str = ", ".join(latest_mod.get("loaders", []))
+        versions_str = ", ".join(latest_mod.get("game_versions", []))
         print(
-            "UPDATING: " if existing_mod else "DOWNLOADING: ",
-            file_to_download["filename"],
-            latest_mod["loaders"],
-            latest_mod["game_versions"],
-        )
-        modrinth_client.download_file(
-            file_to_download["url"], f"{args.directory}/{filename_with_id}"
+            f"{action}: {mod_display} - {file_to_download['filename']} "
+            f"(loaders: {loaders_str}, versions: {versions_str})"
         )
 
+        # Download the file
+        download_success = modrinth_client.download_file(
+            file_to_download["url"], file_path
+        )
+
+        if not download_success:
+            print(f"ERROR: Failed to download {mod_display}")
+            stats["failed"] += 1
+            failed_mods.append(mod_display)
+            return
+
+        # Only remove old file if download succeeded
         if existing_mod:
-            print(f"REMOVING previous version:  {existing_mod['filename']}")
-            os.remove(f"{args.directory}/{existing_mod['filename']}")
+            old_file_path = os.path.join(directory, existing_mod["filename"])
+            try:
+                if os.path.exists(old_file_path):
+                    os.remove(old_file_path)
+                    print(f"REMOVED: Previous version {existing_mod['filename']} for {mod_display}")
+            except OSError as e:
+                print(f"WARNING: Failed to remove old file {existing_mod['filename']} for {mod_display}: {e}")
+
+        stats["downloaded"] += 1
+        if existing_mod:
+            stats["updated"] += 1
+
     except Exception as e:
-        print(f"Failed to download {mod_id}: {e}")
+        # Error case - fetch mod name for better error message
+        try:
+            mod_name = get_mod_name(modrinth_client, mod_id)
+            error_mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+        except:
+            error_mod_display = mod_id
+        print(f"ERROR: Failed to process {error_mod_display}: {e}")
+        stats["failed"] += 1
+        failed_mods.append(error_mod_display)
 
 
 def main():
+    """Main entry point."""
+    args = parse_args()
+
+    # Validate and create directory
+    if not validate_directory(args.directory):
+        return
+
+    # Validate collection ID (basic check - non-empty)
+    if not args.collection or not args.collection.strip():
+        print("ERROR: Collection ID cannot be empty")
+        return
+
+    modrinth_client = ModrinthClient()
+
+    # Get collection details
     collection_details = modrinth_client.get_collection(args.collection)
     if not collection_details:
-        print(f"Collection id={args.collection} not found")
+        print(f"ERROR: Collection id={args.collection} not found or inaccessible")
         return
-    mods: str = collection_details["projects"]
-    print("Mods in collection: ", mods)
-    existing_mods = get_existing_mods()
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        executor.map(download_mod, mods, [existing_mods] * len(mods))
+    mods: List[str] = collection_details.get("projects", [])
+    if not mods:
+        print(f"WARNING: Collection {args.collection} contains no mods")
+        return
+
+    print(f"Found {len(mods)} mod(s) in collection")
+    existing_mods = get_existing_mods(args.directory)
+
+    # Statistics tracking
+    stats = {
+        "downloaded": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    failed_mods: List[str] = []
+
+    # Download mods in parallel
+    max_workers = 5  # Reasonable default for concurrent downloads
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                download_mod,
+                mod_id,
+                modrinth_client,
+                args.directory,
+                args.version,
+                args.loader,
+                args.update,
+                existing_mods,
+                stats,
+                failed_mods,
+            )
+            for mod_id in mods
+        ]
+        # Wait for all downloads to complete
+        for future in futures:
+            future.result()
+
+    # Print summary
+    print("\n" + "=" * 50)
+    print("SUMMARY")
+    print("=" * 50)
+    print(f"Total mods processed: {len(mods)}")
+    print(f"Successfully downloaded: {stats['downloaded']}")
+    if stats["updated"] > 0:
+        print(f"Updated: {stats['updated']}")
+    print(f"Skipped: {stats['skipped']}")
+    print(f"Failed: {stats['failed']}")
+    if failed_mods:
+        print("\nFailed mods:")
+        for mod in failed_mods:
+            print(f"  - {mod}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
