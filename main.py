@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
+import sys
 from typing import Optional, Dict, List
 from urllib import request, error
 
@@ -72,6 +73,25 @@ def extract_collection_id(collection_input: str) -> str:
     return collection_input.strip()
 
 
+def safe_input(prompt: str) -> str:
+    """Read input from user, using /dev/tty when stdin is piped.
+    
+    This allows interactive prompts to work even when the script is piped.
+    """
+    if sys.stdin.isatty():
+        # Normal interactive mode
+        return input(prompt)
+    else:
+        # Piped mode - read from terminal directly
+        try:
+            with open('/dev/tty', 'r') as tty:
+                print(prompt, end='', flush=True)
+                return tty.readline().rstrip('\n\r')
+        except (OSError, IOError):
+            # Fallback if /dev/tty is not available (Windows or unusual setup)
+            raise RuntimeError("Cannot read input: stdin is not a terminal and /dev/tty is not available. Please provide arguments via command line.")
+
+
 def parse_args():
     """Parse command-line arguments and prompt for missing values."""
     parser = argparse.ArgumentParser(
@@ -113,19 +133,19 @@ def parse_args():
     )
     args = parser.parse_args()
     
-    # Prompt for missing required values with defaults shown
+    # Prompt for missing required values (works even when piped via /dev/tty)
     if not args.collection:
-        args.collection = input("Enter collection ID or URL: ").strip()
+        args.collection = safe_input("Enter collection ID or URL: ").strip()
     
     if not args.version:
-        args.version = input('Enter Minecraft version (e.g., "1.21.9"): ').strip()
+        args.version = safe_input('Enter Minecraft version (e.g., "1.21.9"): ').strip()
     
     if not args.loader:
-        args.loader = input('Enter loader (e.g., "fabric", "forge", "quilt"): ').strip()
+        args.loader = safe_input('Enter loader (e.g., "fabric", "forge", "quilt"): ').strip()
     
     # Handle update flag (default True if not specified)
     if args.update is None:
-        update_input = input('Update existing mods? [Y/n] (default: Y): ').strip().lower()
+        update_input = safe_input('Update existing mods? [Y/n] (default: Y): ').strip().lower()
         args.update = update_input not in ('n', 'no', 'false', '0')
     # If -u was provided, args.update is True; if --no-update was provided, it's False
     
