@@ -2,6 +2,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import re
 from typing import Optional, Dict, List
 from urllib import request, error
 
@@ -55,40 +56,83 @@ class ModrinthClient:
         return self.get(f"/v3/collection/{collection_id}")
 
 
+def extract_collection_id(collection_input: str) -> str:
+    """Extract collection ID from URL or return as-is if already an ID.
+    
+    Examples:
+        https://modrinth.com/collection/5OBQuutT -> 5OBQuutT
+        5OBQuutT -> 5OBQuutT
+    """
+    # Check if it's a URL
+    url_pattern = r'(?:https?://)?(?:www\.)?modrinth\.com/collection/([^/?]+)'
+    match = re.search(url_pattern, collection_input)
+    if match:
+        return match.group(1)
+    # Otherwise assume it's already an ID
+    return collection_input.strip()
+
+
 def parse_args():
-    """Parse command-line arguments."""
+    """Parse command-line arguments and prompt for missing values."""
     parser = argparse.ArgumentParser(
         description="Download and update mods from a Modrinth collection."
     )
     parser.add_argument(
         "-c",
         "--collection",
-        required=True,
-        help="ID of the collection to download. Can be obtained from the collection URL (for https://modrinth.com/collection/5OBQuutT collection_id is 5OBQuutT).",
+        default=None,
+        help="ID or URL of the collection to download (e.g., 5OBQuutT or https://modrinth.com/collection/5OBQuutT).",
     )
     parser.add_argument(
-        "-v", "--version", required=True, help='Minecraft version ("1.20.4", "1.21").'
+        "-v", "--version", default=None, help='Minecraft version (e.g., "1.20.4", "1.21").'
     )
     parser.add_argument(
         "-l",
         "--loader",
-        required=True,
-        help='Loader to use ("fabric", "forge", "quilt" etc).',
+        default=None,
+        help='Loader to use (e.g., "fabric", "forge", "quilt").',
     )
     parser.add_argument(
         "-d",
         "--directory",
         default="./mods",
-        help='Directory to download mods to. Default: "mods"',
+        help='Directory to download mods to. Default: "./mods"',
     )
     parser.add_argument(
         "-u",
         "--update",
-        default=False,
+        default=None,
         action="store_true",
-        help="Download and update existing mods. Default: false",
+        help="Download and update existing mods. Default: true",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--no-update",
+        dest="update",
+        action="store_false",
+        help="Do not update existing mods",
+    )
+    args = parser.parse_args()
+    
+    # Prompt for missing required values with defaults shown
+    if not args.collection:
+        args.collection = input("Enter collection ID or URL: ").strip()
+    
+    if not args.version:
+        args.version = input('Enter Minecraft version (e.g., "1.21.9"): ').strip()
+    
+    if not args.loader:
+        args.loader = input('Enter loader (e.g., "fabric", "forge", "quilt"): ').strip()
+    
+    # Handle update flag (default True if not specified)
+    if args.update is None:
+        update_input = input('Update existing mods? [Y/n] (default: Y): ').strip().lower()
+        args.update = update_input not in ('n', 'no', 'false', '0')
+    # If -u was provided, args.update is True; if --no-update was provided, it's False
+    
+    # Extract collection ID from URL if needed
+    args.collection = extract_collection_id(args.collection)
+    
+    return args
 
 
 def validate_directory(directory: str) -> bool:
@@ -453,9 +497,9 @@ def main():
     if not validate_directory(args.directory):
         return
 
-    # Validate collection ID (basic check - non-empty)
-    if not args.collection or not args.collection.strip():
-        print("ERROR: Collection ID cannot be empty")
+    # Validate required inputs (should not be empty after prompting)
+    if not args.collection or not args.version or not args.loader:
+        print("ERROR: Collection ID, version, and loader are required")
         return
 
     modrinth_client = ModrinthClient()
