@@ -22,10 +22,10 @@ A fast, user-friendly Python script that downloads mods from Modrinth collection
 The easiest way to use the script - just run it and follow the prompts:
 
 ```bash
-# Using curl
+# Using curl (replace python with python3 for mac)
 curl -sL https://raw.githubusercontent.com/aayushdutt/modrinth-collection-downloader/master/main.py | python -
 
-# Or using wget
+# Or using wget (replace python with python3 for mac)
 wget -qO- https://raw.githubusercontent.com/aayushdutt/modrinth-collection-downloader/master/main.py | python -
 ```
 
