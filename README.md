@@ -103,3 +103,7 @@ options:
 - **"No version found"**: Mod doesn't support the specified version/loader. Check Modrinth for supported versions.
 - **"Collection not found"**: Verify the collection ID/URL is correct and public.
 - **Dependencies not downloading**: Only "required" dependencies are downloaded. Optional ones are skipped.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=aayushdutt/modrinth-collection-downloader&type=date&legend=top-left)](https://www.star-history.com/#aayushdutt/modrinth-collection-downloader&type=date&legend=top-left)
