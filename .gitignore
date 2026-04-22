@@ -1,3 +1,5 @@
 venv
 mods
 .python-version
+__pycache__/
+*.py[cod]
