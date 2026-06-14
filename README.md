@@ -15,6 +15,8 @@ A fast, user-friendly Python script that downloads mods from Modrinth collection
 - 🔄 **Smart Updates** - Updates existing mods by default (configurable)
 - 📊 **Detailed Statistics** - Comprehensive summary with separate tracking for mods and dependencies
 
+> Also check out my new project [mctui](https://github.com/aayushdutt/mctui) - the TUI launcher for Minecraft. Minimal, fast launcher with mod management and other batteries built in.
+
 ## 🚀 Quick Start
 
 ### Interactive oneliner
