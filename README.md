@@ -35,21 +35,21 @@ You'll be prompted for:
 
 - Collection ID or URL
 - Minecraft version
-- Loader (fabric, forge, quilt, etc.)
+- Loader (defaults to fabric)
 - Update preference (defaults to Yes)
 
 **Example session:**
 
 ```bash
 $ curl -sL https://raw.githubusercontent.com/aayushdutt/modrinth-collection-downloader/master/main.py | python -
-Enter collection ID or URL: https://modrinth.com/collection/5OBQuutT
-Enter Minecraft version (e.g., "1.21.9"): 1.21.9
-Enter loader (e.g., "fabric", "forge", "quilt"): fabric
+Enter collection ID or URL: https://modrinth.com/collection/YyGKtxlz
+Enter Minecraft version (e.g., "26.2"): 26.2
+Enter loader (e.g., "fabric", "forge", "quilt") [default: fabric]:
 Update existing mods? [Y/n] (default: Y):
-Found 22 mod(s) in collection
-Processing 2 required dependency(ies) for Dynamic FPS...
-  [DEPENDENCY] DOWNLOADING: Fabric API - fabric-api-0.134.0+1.21.9.jar...
-DOWNLOADING: Dynamic FPS - dynamic-fps-3.10.1+minecraft-1.21.9-fabric.jar...
+Found 4 mod(s) in collection
+Processing 1 required dependency(ies) for Litematica...
+  [DEPENDENCY] DOWNLOADING: MaLiLib - malilib-....jar...
+DOWNLOADING: Fresh Animations - FreshAnimations_....zip...
 ...
 ```
 
@@ -64,8 +64,8 @@ curl -sL https://raw.githubusercontent.com/aayushdutt/modrinth-collection-downlo
 # Run interactively
 python main.py
 
-# Or with arguments
-python main.py -c 5OBQuutT -v 1.21.9 -l fabric
+# Or with arguments (fully non-interactive)
+python main.py -c YyGKtxlz -v 26.2 -l fabric -u
 ```
 
 ## 📋 Command-Line Options
@@ -75,24 +75,31 @@ options:
   -h, --help            show this help message and exit
   -c, --collection COLLECTION
                         ID or URL of the collection to download
-                        (e.g., 5OBQuutT or https://modrinth.com/collection/5OBQuutT)
+                        (e.g., YyGKtxlz or https://modrinth.com/collection/YyGKtxlz)
   -v, --version VERSION
-                        Minecraft version (e.g., "1.20.4", "1.21")
-  -l, --loader LOADER   Loader to use (e.g., "fabric", "forge", "quilt")
+                        Minecraft version (e.g., "26.2")
+  -l, --loader LOADER   Loader to use (e.g., "fabric", "forge", "quilt"). Default: "fabric"
   -d, --directory DIRECTORY
                         Directory to download mods to. Default: "./mods"
   -u, --update          Download and update existing mods. Default: true
   --no-update           Do not update existing mods
 ```
 
-**Note:** All arguments except `-d` are optional. The script will prompt for any missing values.
+**Note:** All arguments except `-d` are optional. Missing values are prompted; loader defaults to fabric if you press Enter. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs.
 
 ## How It Works
 
 - **Dependencies**: Automatically downloads required dependencies recursively. Marked with `[DEPENDENCY]` in logs.
 - **Parallel Downloads**: Downloads up to 5 mods concurrently.
 - **Updates**: Enabled by default. Skips mods already at latest version by comparing filenames.
-- **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-3.10.1+minecraft-1.21.9-fabric.LQ3K71Q1.jar`)
+- **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`)
+
+## Tests
+
+```bash
+python3 -m unittest test_main -v   # unit (offline)
+python3 -m unittest test_e2e -v    # e2e (hits Modrinth)
+```
 
 ## Requirements
 

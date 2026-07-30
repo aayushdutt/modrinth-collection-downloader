@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
+import shutil
 import sys
 from typing import Optional, Dict, List
 from urllib import request, error
@@ -104,19 +105,24 @@ def parse_args():
         help="ID or URL of the collection to download (e.g., 5OBQuutT or https://modrinth.com/collection/5OBQuutT).",
     )
     parser.add_argument(
-        "-v", "--version", default=None, help='Minecraft version (e.g., "1.20.4", "1.21").'
+        "-v", "--version", default=None, help='Minecraft version (e.g., "26.2").'
     )
     parser.add_argument(
         "-l",
         "--loader",
         default=None,
-        help='Loader to use (e.g., "fabric", "forge", "quilt").',
+        help='Loader to use (e.g., "fabric", "forge", "quilt"). Default: "fabric".',
     )
     parser.add_argument(
         "-d",
         "--directory",
         default="./mods",
         help='Directory to download mods to. Default: "./mods"',
+    )
+    parser.add_argument(
+        "--resourcepacks-directory",
+        default=None,
+        help='Directory for resource packs. Default: sibling "resourcepacks" folder next to the mods directory.',
     )
     parser.add_argument(
         "-u",
@@ -138,10 +144,13 @@ def parse_args():
         args.collection = safe_input("Enter collection ID or URL: ").strip()
     
     if not args.version:
-        args.version = safe_input('Enter Minecraft version (e.g., "1.21.9"): ').strip()
-    
-    if not args.loader:
-        args.loader = safe_input('Enter loader (e.g., "fabric", "forge", "quilt"): ').strip()
+        args.version = safe_input('Enter Minecraft version (e.g., "26.2"): ').strip()
+
+    if args.loader is None:
+        loader_input = safe_input(
+            'Enter loader (e.g., "fabric", "forge", "quilt") [default: fabric]: '
+        ).strip()
+        args.loader = loader_input or "fabric"
     
     # Handle update flag (default True if not specified)
     if args.update is None:
@@ -151,8 +160,20 @@ def parse_args():
     
     # Extract collection ID from URL if needed
     args.collection = extract_collection_id(args.collection)
+
+    if args.resourcepacks_directory is None:
+        args.resourcepacks_directory = default_resourcepacks_directory(args.directory)
     
     return args
+
+
+def default_resourcepacks_directory(mods_directory: str) -> str:
+    """Return the standard sibling ``resourcepacks`` folder for a mods directory.
+
+    Example: ``./mods`` -> ``./resourcepacks``; ``/instance/mods`` -> ``/instance/resourcepacks``.
+    """
+    parent = os.path.dirname(os.path.abspath(mods_directory))
+    return os.path.join(parent, "resourcepacks")
 
 
 def validate_directory(directory: str) -> bool:
@@ -176,12 +197,14 @@ def validate_directory(directory: str) -> bool:
 def get_existing_mods(directory: str) -> Dict[str, Dict[str, str]]:
     """Get existing mods from the directory.
     
-    Returns a dictionary mapping mod_id to mod info dict.
+    Returns a dictionary mapping mod_id to mod info dict with keys:
+    ``id``, ``filename``, and ``directory`` (absolute path where the file lives).
     Handles edge cases like files without extensions or unusual names.
     """
     if not os.path.exists(directory):
         return {}
     
+    abs_dir = os.path.abspath(directory)
     existing_mods: Dict[str, Dict[str, str]] = {}
     try:
         for item in os.listdir(directory):
@@ -196,7 +219,11 @@ def get_existing_mods(directory: str) -> Dict[str, Dict[str, str]]:
             if len(parts) >= 2:
                 # Has at least one dot, mod_id should be second-to-last part
                 mod_id = parts[-2]
-                existing_mods[mod_id] = {"id": mod_id, "filename": item}
+                existing_mods[mod_id] = {
+                    "id": mod_id,
+                    "filename": item,
+                    "directory": abs_dir,
+                }
             else:
                 # No extension, skip or handle differently
                 # For now, we'll skip files without proper format
@@ -207,17 +234,48 @@ def get_existing_mods(directory: str) -> Dict[str, Dict[str, str]]:
     return existing_mods
 
 
-def get_mod_name(modrinth_client: ModrinthClient, mod_id: str) -> str:
+def merge_existing_mods(
+    mods_directory: str, resourcepacks_directory: str
+) -> Dict[str, Dict[str, str]]:
+    """Index files in both ``mods`` and ``resourcepacks`` for skip/update logic."""
+    merged = dict(get_existing_mods(mods_directory))
+    for mod_id, info in get_existing_mods(resourcepacks_directory).items():
+        merged[mod_id] = info
+    return merged
+
+
+def get_mod_name(
+    modrinth_client: ModrinthClient,
+    mod_id: str,
+    project_data: Optional[dict] = None,
+) -> str:
     """Get the mod name (title or slug) for display purposes."""
-    project_data = modrinth_client.get_mod_project(mod_id)
-    if project_data:
+    data = project_data if project_data is not None else modrinth_client.get_mod_project(mod_id)
+    if data:
         # Prefer title, fallback to slug, fallback to mod_id
-        return project_data.get("title") or project_data.get("slug") or mod_id
+        return data.get("title") or data.get("slug") or mod_id
     return mod_id
 
 
+def _version_matches_loader(
+    mod_version: dict, loader: str, project_type: str
+) -> bool:
+    """Whether a version's loaders satisfy the requested loader filter."""
+    loaders = mod_version.get("loaders", [])
+    if loader in loaders:
+        return True
+    # Modrinth marks resource pack versions with loader ``minecraft`` only.
+    if project_type == "resourcepack" and "minecraft" in loaders:
+        return True
+    return False
+
+
 def get_latest_version(
-    modrinth_client: ModrinthClient, mod_id: str, version: str, loader: str
+    modrinth_client: ModrinthClient,
+    mod_id: str,
+    version: str,
+    loader: str,
+    project_type: str = "mod",
 ) -> Optional[dict]:
     """Get the latest version of a mod matching the specified version and loader."""
     mod_versions_data = modrinth_client.get_mod_version(mod_id)
@@ -229,17 +287,30 @@ def get_latest_version(
             mod_version
             for mod_version in mod_versions_data
             if version in mod_version.get("game_versions", [])
-            and loader in mod_version.get("loaders", [])
+            and _version_matches_loader(mod_version, loader, project_type)
         ),
         None,
     )
     return mod_version_to_download
 
 
+def resolve_target_directory(
+    project_type: str,
+    mods_directory: str,
+    resourcepacks_directory: str,
+    is_dependency: bool = False,
+) -> str:
+    """Choose mods vs resourcepacks folder for a project download."""
+    if project_type == "resourcepack" and not is_dependency:
+        return resourcepacks_directory
+    return mods_directory
+
+
 def download_mod(
     mod_id: str,
     modrinth_client: ModrinthClient,
-    directory: str,
+    mods_directory: str,
+    resourcepacks_directory: str,
     version: str,
     loader: str,
     update: bool,
@@ -268,17 +339,29 @@ def download_mod(
         return
     
     processed_mods.add(mod_id)
-    
+
     # Prefix for dependency logging
     dep_prefix = "  [DEPENDENCY] " if is_dependency else ""
     
     try:
+        project_data = modrinth_client.get_mod_project(mod_id)
+        project_type = (project_data or {}).get("project_type", "mod")
+        # Dependencies are almost always mods/libraries; keep them in the mods folder.
+        target_directory = resolve_target_directory(
+            project_type,
+            mods_directory,
+            resourcepacks_directory,
+            is_dependency=is_dependency,
+        )
+        if not validate_directory(target_directory):
+            return
+
         existing_mod = existing_mods.get(mod_id)
 
         # Early skip - no need to fetch mod name
         if not update and existing_mod:
             if is_dependency:
-                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
                 mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"{dep_prefix}SKIP: {mod_display} already exists (use -u/--update to update)")
             else:
@@ -289,22 +372,36 @@ def download_mod(
             else:
                 stats["main_skipped"] = stats.get("main_skipped", 0) + 1
             # Still process dependencies even if mod is skipped
-            latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
+            latest_mod = get_latest_version(
+                modrinth_client, mod_id, version, loader, project_type
+            )
             if latest_mod:
                 _process_dependencies(
-                    latest_mod, modrinth_client, directory, version, loader,
-                    update, existing_mods, stats, failed_mods, processed_mods, mod_id
+                    latest_mod,
+                    modrinth_client,
+                    mods_directory,
+                    resourcepacks_directory,
+                    version,
+                    loader,
+                    update,
+                    existing_mods,
+                    stats,
+                    failed_mods,
+                    processed_mods,
+                    mod_id,
                 )
             return
 
-        latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
+        latest_mod = get_latest_version(
+            modrinth_client, mod_id, version, loader, project_type
+        )
         # import json
         # print("=" * 50)
         # print(f"existing_mod: {existing_mod}, latest_mod: {json.dumps(latest_mod)}")
         # print("=" * 50)
         if not latest_mod:
             # Error case - fetch mod name for better error message
-            mod_name = get_mod_name(modrinth_client, mod_id)
+            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
             mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
             error_msg = f"{dep_prefix}ERROR: No version found for {mod_display} with MC_VERSION={version} and LOADER={loader}"
             if is_dependency and parent_mod_id:
@@ -323,13 +420,23 @@ def download_mod(
             dependencies = latest_mod.get("dependencies", [])
             required_deps = [dep for dep in dependencies if dep.get("dependency_type") == "required"]
             if required_deps:
-                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
                 mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"Processing {len(required_deps)} required dependency(ies) for {mod_display}...")
         
         _process_dependencies(
-            latest_mod, modrinth_client, directory, version, loader,
-            update, existing_mods, stats, failed_mods, processed_mods, mod_id
+            latest_mod,
+            modrinth_client,
+            mods_directory,
+            resourcepacks_directory,
+            version,
+            loader,
+            update,
+            existing_mods,
+            stats,
+            failed_mods,
+            processed_mods,
+            mod_id,
         )
 
         # Find primary file
@@ -338,7 +445,7 @@ def download_mod(
         )
         if not file_to_download:
             # Error case - fetch mod name for better error message
-            mod_name = get_mod_name(modrinth_client, mod_id)
+            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
             mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
             print(f"{dep_prefix}ERROR: Couldn't find a primary file to download for {mod_display}")
             stats["failed"] += 1
@@ -353,28 +460,60 @@ def download_mod(
         filename_parts = filename.split(".")
         filename_parts.insert(-1, mod_id)
         filename_with_id = ".".join(filename_parts)
-        file_path = os.path.join(directory, filename_with_id)
+        file_path = os.path.join(target_directory, filename_with_id)
 
-        # Skip if already at latest version - check both existing_mods dict and disk
+        # Skip if already at latest version in the correct directory
         if existing_mod and existing_mod["filename"] == filename_with_id:
-            if is_dependency:
-                mod_name = get_mod_name(modrinth_client, mod_id)
-                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
-                print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) latest version already exists")
-            else:
-                print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
-            stats["skipped"] += 1
-            if is_dependency:
-                stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
-            else:
-                stats["main_skipped"] = stats.get("main_skipped", 0) + 1
-            return
+            existing_dir = os.path.abspath(
+                existing_mod.get("directory", target_directory)
+            )
+            if existing_dir == os.path.abspath(target_directory):
+                if is_dependency:
+                    mod_name = get_mod_name(modrinth_client, mod_id, project_data)
+                    mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+                    print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) latest version already exists")
+                else:
+                    print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
+                stats["skipped"] += 1
+                if is_dependency:
+                    stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
+                else:
+                    stats["main_skipped"] = stats.get("main_skipped", 0) + 1
+                return
+
+            # Latest file lives in the wrong folder (e.g. pack previously saved under mods/)
+            old_file_path = os.path.join(existing_dir, existing_mod["filename"])
+            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
+            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+            try:
+                if os.path.exists(old_file_path):
+                    shutil.move(old_file_path, file_path)
+                    print(
+                        f"{dep_prefix}MOVED: {mod_display} ({filename_with_id}) "
+                        f"from {existing_dir} to {os.path.abspath(target_directory)}"
+                    )
+                    existing_mods[mod_id] = {
+                        "id": mod_id,
+                        "filename": filename_with_id,
+                        "directory": os.path.abspath(target_directory),
+                    }
+                    stats["updated"] += 1
+                    if is_dependency:
+                        stats["deps_updated"] = stats.get("deps_updated", 0) + 1
+                    else:
+                        stats["main_updated"] = stats.get("main_updated", 0) + 1
+                    return
+            except OSError as e:
+                print(
+                    f"{dep_prefix}WARNING: Failed to move {existing_mod['filename']} "
+                    f"for {mod_display}: {e}; will re-download"
+                )
         
         # Also check if file exists on disk with same name (might have been downloaded as a dependency)
         # Only skip if it's the exact same version and we're not in update mode
         if os.path.exists(file_path) and not update:
             if is_dependency:
-                mod_name = get_mod_name(modrinth_client, mod_id)
+                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
                 mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) already exists on disk")
             else:
@@ -387,7 +526,7 @@ def download_mod(
             return
 
         # We're actually downloading/updating - fetch mod name for display
-        mod_name = get_mod_name(modrinth_client, mod_id)
+        mod_name = get_mod_name(modrinth_client, mod_id, project_data)
         mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
         action = "UPDATING" if existing_mod else "DOWNLOADING"
         loaders_str = ", ".join(latest_mod.get("loaders", []))
@@ -420,15 +559,22 @@ def download_mod(
             failed_mods.append(mod_display)
             return
 
-        # Only remove old file if download succeeded
+        # Only remove old file if download succeeded (from wherever it previously lived)
         if existing_mod:
-            old_file_path = os.path.join(directory, existing_mod["filename"])
+            old_dir = existing_mod.get("directory", target_directory)
+            old_file_path = os.path.join(old_dir, existing_mod["filename"])
             try:
-                if os.path.exists(old_file_path):
+                if os.path.exists(old_file_path) and os.path.abspath(old_file_path) != os.path.abspath(file_path):
                     os.remove(old_file_path)
                     print(f"{dep_prefix}REMOVED: Previous version {existing_mod['filename']} for {mod_display}")
             except OSError as e:
                 print(f"{dep_prefix}WARNING: Failed to remove old file {existing_mod['filename']} for {mod_display}: {e}")
+
+        existing_mods[mod_id] = {
+            "id": mod_id,
+            "filename": filename_with_id,
+            "directory": os.path.abspath(target_directory),
+        }
 
         stats["downloaded"] += 1
         if is_dependency:
@@ -461,7 +607,8 @@ def download_mod(
 def _process_dependencies(
     latest_mod: dict,
     modrinth_client: ModrinthClient,
-    directory: str,
+    mods_directory: str,
+    resourcepacks_directory: str,
     version: str,
     loader: str,
     update: bool,
@@ -492,11 +639,12 @@ def _process_dependencies(
         if not dep_project_id:
             continue
         
-        # Recursively download the dependency
+        # Recursively download the dependency (always into the mods directory path)
         download_mod(
             dep_project_id,
             modrinth_client,
-            directory,
+            mods_directory,
+            resourcepacks_directory,
             version,
             loader,
             update,
@@ -513,7 +661,7 @@ def main():
     """Main entry point."""
     args = parse_args()
 
-    # Validate and create directory
+    # Validate and create mods directory (resourcepacks is created on demand)
     if not validate_directory(args.directory):
         return
 
@@ -536,7 +684,7 @@ def main():
         return
 
     print(f"Found {len(mods)} mod(s) in collection")
-    existing_mods = get_existing_mods(args.directory)
+    existing_mods = merge_existing_mods(args.directory, args.resourcepacks_directory)
 
     # Statistics tracking
     stats = {
@@ -556,6 +704,7 @@ def main():
                 mod_id,
                 modrinth_client,
                 args.directory,
+                args.resourcepacks_directory,
                 args.version,
                 args.loader,
                 args.update,
