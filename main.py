@@ -119,6 +119,11 @@ def parse_args():
         help='Directory to download mods to. Default: "./mods"',
     )
     parser.add_argument(
+        "--resourcepacks-directory",
+        default="./resourcepacks",
+        help='Directory to download resource packs to. Default: "./resourcepacks"',
+    )
+    parser.add_argument(
         "-u",
         "--update",
         default=None,
@@ -240,6 +245,7 @@ def download_mod(
     mod_id: str,
     modrinth_client: ModrinthClient,
     directory: str,
+    resourcepacks_directory: str = "./resourcepacks",
     version: str,
     loader: str,
     update: bool,
@@ -269,6 +275,11 @@ def download_mod(
     
     processed_mods.add(mod_id)
     
+    # Determine target directory based on project type
+    project_data = modrinth_client.get_mod_project(mod_id)
+    is_resourcepack = project_data and project_data.get("project_type") == "resourcepack"
+    target_dir = resourcepacks_directory if is_resourcepack else directory
+
     # Prefix for dependency logging
     dep_prefix = "  [DEPENDENCY] " if is_dependency else ""
     
@@ -292,7 +303,7 @@ def download_mod(
             latest_mod = get_latest_version(modrinth_client, mod_id, version, loader)
             if latest_mod:
                 _process_dependencies(
-                    latest_mod, modrinth_client, directory, version, loader,
+                    latest_mod, modrinth_client, target_dir, resourcepacks_directory, version, loader,
                     update, existing_mods, stats, failed_mods, processed_mods, mod_id
                 )
             return
@@ -328,7 +339,7 @@ def download_mod(
                 print(f"Processing {len(required_deps)} required dependency(ies) for {mod_display}...")
         
         _process_dependencies(
-            latest_mod, modrinth_client, directory, version, loader,
+            latest_mod, modrinth_client, target_dir, resourcepacks_directory, version, loader,
             update, existing_mods, stats, failed_mods, processed_mods, mod_id
         )
 
@@ -353,7 +364,7 @@ def download_mod(
         filename_parts = filename.split(".")
         filename_parts.insert(-1, mod_id)
         filename_with_id = ".".join(filename_parts)
-        file_path = os.path.join(directory, filename_with_id)
+        file_path = os.path.join(target_dir, filename_with_id)
 
         # Skip if already at latest version - check both existing_mods dict and disk
         if existing_mod and existing_mod["filename"] == filename_with_id:
@@ -422,7 +433,7 @@ def download_mod(
 
         # Only remove old file if download succeeded
         if existing_mod:
-            old_file_path = os.path.join(directory, existing_mod["filename"])
+            old_file_path = os.path.join(target_dir, existing_mod["filename"])
             try:
                 if os.path.exists(old_file_path):
                     os.remove(old_file_path)
@@ -462,6 +473,7 @@ def _process_dependencies(
     latest_mod: dict,
     modrinth_client: ModrinthClient,
     directory: str,
+    resourcepacks_directory: str = "./resourcepacks",
     version: str,
     loader: str,
     update: bool,
@@ -497,6 +509,7 @@ def _process_dependencies(
             dep_project_id,
             modrinth_client,
             directory,
+            resourcepacks_directory,
             version,
             loader,
             update,
@@ -515,6 +528,8 @@ def main():
 
     # Validate and create directory
     if not validate_directory(args.directory):
+        return
+    if not validate_directory(args.resourcepacks_directory):
         return
 
     # Validate required inputs (should not be empty after prompting)
@@ -556,6 +571,7 @@ def main():
                 mod_id,
                 modrinth_client,
                 args.directory,
+                args.resourcepacks_directory,
                 args.version,
                 args.loader,
                 args.update,
