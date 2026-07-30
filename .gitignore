@@ -3,3 +3,6 @@ mods
 .python-version
 __pycache__/
 *.py[cod]
+resourcepacks
+.e2e-*
+mcd-e2e-*
