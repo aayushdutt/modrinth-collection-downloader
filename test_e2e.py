@@ -46,14 +46,36 @@ def _has_project(files: list[str], project_id: str) -> bool:
     return any(f".{project_id}." in name for name in files)
 
 
-def _version_matches(version: dict, project_type: str) -> bool:
+def _version_matches(version: dict, project_type: str, max_channel: str = "release") -> bool:
     game_versions = version.get("game_versions") or []
     loaders = version.get("loaders") or []
     if MC_VERSION not in game_versions:
         return False
-    if LOADER in loaders:
-        return True
-    return project_type == "resourcepack" and "minecraft" in loaders
+    loader_ok = LOADER in loaders or (
+        project_type == "resourcepack" and "minecraft" in loaders
+    )
+    if not loader_ok:
+        return False
+    version_type = version.get("version_type") or "release"
+    allowed = {"release"}
+    if max_channel in ("beta", "alpha"):
+        allowed.add("beta")
+    if max_channel == "alpha":
+        allowed.add("alpha")
+    return version_type in allowed
+
+
+def _select_expected_version(versions: list, project_type: str, max_channel: str = "release"):
+    matching = [v for v in versions if _version_matches(v, project_type, max_channel)]
+    for channel in ("release", "beta", "alpha"):
+        if max_channel == "release" and channel != "release":
+            continue
+        if max_channel == "beta" and channel == "alpha":
+            continue
+        for version in matching:
+            if (version.get("version_type") or "release") == channel:
+                return version
+    return None
 
 
 def _log(msg: str) -> None:
@@ -76,16 +98,20 @@ class TestE2ECollectionDownload(unittest.TestCase):
 
         projects = {}
         required_deps = set()
+        needs_prerelease = False
         for project_id in project_ids:
             project = _api_get(f"/v2/project/{project_id}")
             versions = _api_get(f"/v2/project/{project_id}/version")
             project_type = project.get("project_type") or "mod"
-            match = next((v for v in versions if _version_matches(v, project_type)), None)
+            match = _select_expected_version(versions, project_type, "release")
             if match is None:
-                self.skipTest(
-                    f"No {project.get('title')} version for "
-                    f"MC {MC_VERSION} / loader {LOADER}"
-                )
+                match = _select_expected_version(versions, project_type, "alpha")
+                if match is None:
+                    self.skipTest(
+                        f"No version for {project.get('title')} with "
+                        f"MC {MC_VERSION} / loader {LOADER}"
+                    )
+                needs_prerelease = True
             title = project.get("title") or project_id
             projects[project_id] = {
                 "title": title,
@@ -96,6 +122,10 @@ class TestE2ECollectionDownload(unittest.TestCase):
             for dep in match.get("dependencies") or []:
                 if dep.get("dependency_type") == "required" and dep.get("project_id"):
                     required_deps.add(dep["project_id"])
+
+        channel_flag = ["--allow-prerelease"] if needs_prerelease else ["--channel", "release"]
+        if needs_prerelease:
+            _log("collection includes prerelease-only projects; using --allow-prerelease")
 
         mod_ids = [pid for pid, info in projects.items() if info["type"] != "resourcepack"]
         pack_ids = [pid for pid, info in projects.items() if info["type"] == "resourcepack"]
@@ -118,7 +148,7 @@ class TestE2ECollectionDownload(unittest.TestCase):
         packs_dir = os.path.join(tmp, "resourcepacks")
         try:
             # --- 1) Initial download ---
-            first = self._run("1/4 initial download", mods_dir, packs_dir, "-u")
+            first = self._run("1/4 initial download", mods_dir, packs_dir, *channel_flag, "-u")
             self.assertEqual(
                 first.returncode,
                 0,
@@ -159,7 +189,9 @@ class TestE2ECollectionDownload(unittest.TestCase):
             # --- 2) Idempotent update: no re-downloads ---
             before_mods = set(mods)
             before_packs = set(packs)
-            second = self._run("2/4 update (expect skips)", mods_dir, packs_dir, "-u")
+            second = self._run(
+                "2/4 update (expect skips)", mods_dir, packs_dir, *channel_flag, "-u"
+            )
             self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
             self.assertNotIn("DOWNLOADING:", second.stdout)
             self.assertEqual(set(_files(mods_dir)), before_mods)
@@ -167,7 +199,11 @@ class TestE2ECollectionDownload(unittest.TestCase):
 
             # --- 3) --no-update leaves files untouched ---
             third = self._run(
-                "3/4 --no-update (expect skips)", mods_dir, packs_dir, "--no-update"
+                "3/4 --no-update (expect skips)",
+                mods_dir,
+                packs_dir,
+                *channel_flag,
+                "--no-update",
             )
             self.assertEqual(third.returncode, 0, msg=third.stdout + third.stderr)
             self.assertNotIn("DOWNLOADING:", third.stdout)
@@ -188,7 +224,11 @@ class TestE2ECollectionDownload(unittest.TestCase):
             self.assertFalse(_has_project(_files(packs_dir), pack_id))
 
             fourth = self._run(
-                "4/4 migrate pack back to resourcepacks/", mods_dir, packs_dir, "-u"
+                "4/4 migrate pack back to resourcepacks/",
+                mods_dir,
+                packs_dir,
+                *channel_flag,
+                "-u",
             )
             self.assertEqual(fourth.returncode, 0, msg=fourth.stdout + fourth.stderr)
             self.assertTrue(

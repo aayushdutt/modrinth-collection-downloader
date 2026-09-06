@@ -37,6 +37,7 @@ You'll be prompted for:
 - Minecraft version
 - Loader (defaults to fabric)
 - Update preference (defaults to Yes)
+- Prerelease fallback when no release exists (defaults to No; use `--allow-prerelease` or `--channel` to skip)
 
 **Example session:**
 
@@ -83,15 +84,20 @@ options:
                         Directory to download mods to. Default: "./mods"
   -u, --update          Download and update existing mods. Default: true
   --no-update           Do not update existing mods
+  --channel {release,beta,alpha}
+                        Allowed version channels. Default: release only.
+                        beta allows release then beta; alpha allows all.
+  --allow-prerelease    Allow beta/alpha when no release exists (same as --channel alpha)
 ```
 
-**Note:** All arguments except `-d` are optional. Missing values are prompted; loader defaults to fabric if you press Enter. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs.
+**Note:** All arguments except `-d` are optional. Missing values are prompted; loader defaults to fabric if you press Enter. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs. Use `--channel` or `--allow-prerelease` to avoid the prerelease prompt in piped/CI usage.
 
 ## How It Works
 
 - **Dependencies**: Automatically downloads required dependencies recursively. Marked with `[DEPENDENCY]` in logs.
 - **Parallel Downloads**: Downloads up to 5 mods concurrently.
 - **Updates**: Enabled by default. Skips mods already at latest version by comparing filenames.
+- **Version channels**: By default only **release** versions are downloaded, even when a newer alpha exists. Use `--channel beta` or `--channel alpha` to allow prerelease fallbacks, or `--allow-prerelease` for non-interactive runs.
 - **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`)
 
 ## Tests

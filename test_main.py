@@ -132,6 +132,47 @@ class TestResolveTargetDirectory(unittest.TestCase):
         )
 
 
+class TestSelectVersion(unittest.TestCase):
+    RELEASE = {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "release", "id": "rel"}
+    BETA = {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "beta", "id": "beta"}
+    ALPHA = {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "alpha", "id": "alpha"}
+
+    def test_release_beats_newer_alpha(self):
+        versions = [self.ALPHA, self.RELEASE]
+        got = main.select_version(versions, "26.2", "fabric", "mod", "alpha")
+        self.assertEqual(got["id"], "rel")
+
+    def test_release_only_skips_beta(self):
+        versions = [self.BETA]
+        got = main.select_version(versions, "26.2", "fabric", "mod", "release")
+        self.assertIsNone(got)
+
+    def test_beta_channel_falls_back_to_beta(self):
+        versions = [self.BETA, self.ALPHA]
+        got = main.select_version(versions, "26.2", "fabric", "mod", "beta")
+        self.assertEqual(got["id"], "beta")
+
+    def test_alpha_channel_allows_alpha(self):
+        versions = [self.ALPHA]
+        got = main.select_version(versions, "26.2", "fabric", "mod", "alpha")
+        self.assertEqual(got["id"], "alpha")
+
+    def test_picks_newest_within_same_channel(self):
+        older_release = {
+            **self.RELEASE,
+            "id": "rel-old",
+            "version_number": "1.0.0",
+        }
+        newer_release = {
+            **self.RELEASE,
+            "id": "rel-new",
+            "version_number": "2.0.0",
+        }
+        versions = [newer_release, older_release]
+        got = main.select_version(versions, "26.2", "fabric", "mod", "release")
+        self.assertEqual(got["id"], "rel-new")
+
+
 class TestGetLatestVersion(unittest.TestCase):
     class _FakeClient:
         def __init__(self, versions):
@@ -146,16 +187,26 @@ class TestGetLatestVersion(unittest.TestCase):
             {"game_versions": ["26.2"], "loaders": ["fabric"], "id": "ok"},
         ]
         got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "mod"
+            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
         )
         self.assertEqual(got["id"], "ok")
+
+    def test_release_only_ignores_newer_alpha(self):
+        versions = [
+            {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "alpha", "id": "alpha"},
+            {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "release", "id": "rel"},
+        ]
+        got = main.get_latest_version(
+            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
+        )
+        self.assertEqual(got["id"], "rel")
 
     def test_resourcepack_matches_minecraft_loader(self):
         versions = [
             {"game_versions": ["26.2"], "loaders": ["minecraft"], "id": "pack"},
         ]
         got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "resourcepack"
+            self._FakeClient(versions), "x", "26.2", "fabric", "resourcepack", "release"
         )
         self.assertEqual(got["id"], "pack")
 
@@ -164,7 +215,7 @@ class TestGetLatestVersion(unittest.TestCase):
             {"game_versions": ["26.2"], "loaders": ["minecraft"]},
         ]
         got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "mod"
+            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
         )
         self.assertIsNone(got)
 
