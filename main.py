@@ -9,6 +9,9 @@ from typing import Optional, Dict, List
 from urllib import request, error
 
 
+VERSION_CHANNELS = ("release", "beta", "alpha")
+
+
 class ModrinthClient:
     """Client for interacting with the Modrinth API."""
 
@@ -93,7 +96,7 @@ def safe_input(prompt: str) -> str:
             raise RuntimeError("Cannot read input: stdin is not a terminal and /dev/tty is not available. Please provide arguments via command line.")
 
 
-def parse_args():
+def parse_args(argv=None):
     """Parse command-line arguments and prompt for missing values."""
     parser = argparse.ArgumentParser(
         description="Download and update mods from a Modrinth collection."
@@ -137,7 +140,30 @@ def parse_args():
         action="store_false",
         help="Do not update existing mods",
     )
-    args = parser.parse_args()
+    channel_options = parser.add_mutually_exclusive_group()
+    channel_options.add_argument(
+        "--channel",
+        choices=VERSION_CHANNELS,
+        default=None,
+        help=(
+            'Allowed version channels (release, beta, alpha). Default: "release" only. '
+            '"beta" allows release then beta; "alpha" allows all channels.'
+        ),
+    )
+    channel_options.add_argument(
+        "--allow-prerelease",
+        dest="channel",
+        action="store_const",
+        const="alpha",
+        help="Allow beta/alpha versions when no release exists (same as --channel alpha).",
+    )
+    args = parser.parse_args(argv)
+    interactive = (
+        not args.collection
+        or not args.version
+        or args.loader is None
+        or args.update is None
+    )
     
     # Prompt for missing required values (works even when piped via /dev/tty)
     if not args.collection:
@@ -157,7 +183,16 @@ def parse_args():
         update_input = safe_input('Update existing mods? [Y/n] (default: Y): ').strip().lower()
         args.update = update_input not in ('n', 'no', 'false', '0')
     # If -u was provided, args.update is True; if --no-update was provided, it's False
-    
+
+    if args.channel is None:
+        args.channel = "release"
+        if interactive:
+            prerelease_input = safe_input(
+                "Allow prerelease (beta/alpha) when no release is available? [y/N]: "
+            ).strip().lower()
+            if prerelease_input in ("y", "yes", "true", "1"):
+                args.channel = "alpha"
+
     # Extract collection ID from URL if needed
     args.collection = extract_collection_id(args.collection)
 
@@ -257,6 +292,29 @@ def get_mod_name(
     return mod_id
 
 
+def select_version(
+    mod_versions_data: List[dict],
+    game_version: str,
+    loader: str,
+    project_type: str = "mod",
+    max_channel: str = "release",
+) -> Optional[dict]:
+    """Prefer release, then allowed prereleases; preserve newest-first API order."""
+    channels = VERSION_CHANNELS[: VERSION_CHANNELS.index(max_channel) + 1]
+    matching = [
+        mod_version
+        for mod_version in mod_versions_data
+        if game_version in mod_version.get("game_versions", [])
+        and _version_matches_loader(mod_version, loader, project_type)
+    ]
+    for channel in channels:
+        for mod_version in matching:
+            version_type = mod_version.get("version_type") or "release"
+            if version_type == channel:
+                return mod_version
+    return None
+
+
 def _version_matches_loader(
     mod_version: dict, loader: str, project_type: str
 ) -> bool:
@@ -276,22 +334,28 @@ def get_latest_version(
     version: str,
     loader: str,
     project_type: str = "mod",
+    max_channel: str = "release",
+    mod_display: Optional[str] = None,
 ) -> Optional[dict]:
-    """Get the latest version of a mod matching the specified version and loader."""
+    """Get the latest version of a mod matching version, loader, and channel policy."""
     mod_versions_data = modrinth_client.get_mod_version(mod_id)
     if not mod_versions_data:
         return None
 
-    mod_version_to_download = next(
-        (
-            mod_version
-            for mod_version in mod_versions_data
-            if version in mod_version.get("game_versions", [])
-            and _version_matches_loader(mod_version, loader, project_type)
-        ),
-        None,
+    selected = select_version(
+        mod_versions_data, version, loader, project_type, max_channel
     )
-    return mod_version_to_download
+    if not selected:
+        return None
+
+    selected_type = selected.get("version_type") or "release"
+    if selected_type != "release":
+        label = mod_display or mod_id
+        version_number = selected.get("version_number") or selected.get("id", "unknown")
+        print(
+            f"WARNING: No release for {label}; using {selected_type} {version_number}"
+        )
+    return selected
 
 
 def resolve_target_directory(
@@ -320,6 +384,7 @@ def download_mod(
     processed_mods: Optional[set] = None,
     is_dependency: bool = False,
     parent_mod_id: Optional[str] = None,
+    max_channel: str = "release",
 ) -> None:
     """Download or update a mod.
     
@@ -356,13 +421,14 @@ def download_mod(
         if not validate_directory(target_directory):
             return
 
+        mod_name = get_mod_name(modrinth_client, mod_id, project_data)
+        mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
         existing_mod = existing_mods.get(mod_id)
+        keep_existing = existing_mod is not None and not update
 
-        # Early skip - no need to fetch mod name
-        if not update and existing_mod:
+        # Keep installed files, but still resolve their required dependencies.
+        if keep_existing:
             if is_dependency:
-                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"{dep_prefix}SKIP: {mod_display} already exists (use -u/--update to update)")
             else:
                 print(f"SKIP: {mod_id} already exists (use -u/--update to update)")
@@ -371,38 +437,19 @@ def download_mod(
                 stats["deps_skipped"] = stats.get("deps_skipped", 0) + 1
             else:
                 stats["main_skipped"] = stats.get("main_skipped", 0) + 1
-            # Still process dependencies even if mod is skipped
-            latest_mod = get_latest_version(
-                modrinth_client, mod_id, version, loader, project_type
-            )
-            if latest_mod:
-                _process_dependencies(
-                    latest_mod,
-                    modrinth_client,
-                    mods_directory,
-                    resourcepacks_directory,
-                    version,
-                    loader,
-                    update,
-                    existing_mods,
-                    stats,
-                    failed_mods,
-                    processed_mods,
-                    mod_id,
-                )
-            return
 
         latest_mod = get_latest_version(
-            modrinth_client, mod_id, version, loader, project_type
+            modrinth_client,
+            mod_id,
+            version,
+            loader,
+            project_type,
+            max_channel=max_channel,
+            mod_display=mod_display,
         )
-        # import json
-        # print("=" * 50)
-        # print(f"existing_mod: {existing_mod}, latest_mod: {json.dumps(latest_mod)}")
-        # print("=" * 50)
         if not latest_mod:
-            # Error case - fetch mod name for better error message
-            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
+            if keep_existing:
+                return
             error_msg = f"{dep_prefix}ERROR: No version found for {mod_display} with MC_VERSION={version} and LOADER={loader}"
             if is_dependency and parent_mod_id:
                 error_msg += f" (required by {parent_mod_id})"
@@ -416,12 +463,10 @@ def download_mod(
             return
 
         # Process dependencies first (before downloading the mod itself)
-        if not is_dependency:  # Only log dependency processing for main mods
+        if not is_dependency and not keep_existing:
             dependencies = latest_mod.get("dependencies", [])
             required_deps = [dep for dep in dependencies if dep.get("dependency_type") == "required"]
             if required_deps:
-                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"Processing {len(required_deps)} required dependency(ies) for {mod_display}...")
         
         _process_dependencies(
@@ -437,16 +482,17 @@ def download_mod(
             failed_mods,
             processed_mods,
             mod_id,
+            max_channel=max_channel,
         )
+
+        if keep_existing:
+            return
 
         # Find primary file
         file_to_download: Optional[dict] = next(
             (file for file in latest_mod.get("files", []) if file.get("primary")), None
         )
         if not file_to_download:
-            # Error case - fetch mod name for better error message
-            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
             print(f"{dep_prefix}ERROR: Couldn't find a primary file to download for {mod_display}")
             stats["failed"] += 1
             if is_dependency:
@@ -469,8 +515,6 @@ def download_mod(
             )
             if existing_dir == os.path.abspath(target_directory):
                 if is_dependency:
-                    mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-                    mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                     print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) latest version already exists")
                 else:
                     print(f"SKIP: {mod_id} ({filename_with_id}) latest version already exists")
@@ -483,8 +527,6 @@ def download_mod(
 
             # Latest file lives in the wrong folder (e.g. pack previously saved under mods/)
             old_file_path = os.path.join(existing_dir, existing_mod["filename"])
-            mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-            mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
             try:
                 if os.path.exists(old_file_path):
                     shutil.move(old_file_path, file_path)
@@ -513,8 +555,6 @@ def download_mod(
         # Only skip if it's the exact same version and we're not in update mode
         if os.path.exists(file_path) and not update:
             if is_dependency:
-                mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-                mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
                 print(f"{dep_prefix}SKIP: {mod_display} ({filename_with_id}) already exists on disk")
             else:
                 print(f"SKIP: {mod_id} ({filename_with_id}) already exists on disk")
@@ -525,9 +565,6 @@ def download_mod(
                 stats["main_skipped"] = stats.get("main_skipped", 0) + 1
             return
 
-        # We're actually downloading/updating - fetch mod name for display
-        mod_name = get_mod_name(modrinth_client, mod_id, project_data)
-        mod_display = f"{mod_name} ({mod_id})" if mod_name != mod_id else mod_id
         action = "UPDATING" if existing_mod else "DOWNLOADING"
         loaders_str = ", ".join(latest_mod.get("loaders", []))
         versions_str = ", ".join(latest_mod.get("game_versions", []))
@@ -617,6 +654,7 @@ def _process_dependencies(
     failed_mods: List[str],
     processed_mods: set,
     parent_mod_id: str,
+    max_channel: str = "release",
 ) -> None:
     """Process required dependencies for a mod version.
     
@@ -654,6 +692,7 @@ def _process_dependencies(
             processed_mods,
             is_dependency=True,
             parent_mod_id=parent_mod_id,
+            max_channel=max_channel,
         )
 
 
@@ -684,6 +723,7 @@ def main():
         return
 
     print(f"Found {len(mods)} mod(s) in collection")
+    print(f"Version channel policy: {args.channel}")
     existing_mods = merge_existing_mods(args.directory, args.resourcepacks_directory)
 
     # Statistics tracking
@@ -711,6 +751,7 @@ def main():
                 existing_mods,
                 stats,
                 failed_mods,
+                max_channel=args.channel,
             )
             for mod_id in mods
         ]

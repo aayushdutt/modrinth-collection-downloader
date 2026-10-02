@@ -37,6 +37,7 @@ You'll be prompted for:
 - Minecraft version
 - Loader (defaults to fabric)
 - Update preference (defaults to Yes)
+- Prerelease fallback when no release exists (defaults to No; use `--allow-prerelease` or `--channel` to skip)
 
 **Example session:**
 
@@ -46,7 +47,9 @@ Enter collection ID or URL: https://modrinth.com/collection/YyGKtxlz
 Enter Minecraft version (e.g., "26.2"): 26.2
 Enter loader (e.g., "fabric", "forge", "quilt") [default: fabric]:
 Update existing mods? [Y/n] (default: Y):
+Allow prerelease (beta/alpha) when no release is available? [y/N]: y
 Found 4 mod(s) in collection
+Version channel policy: alpha
 Processing 1 required dependency(ies) for Litematica...
   [DEPENDENCY] DOWNLOADING: MaLiLib - malilib-....jar...
 DOWNLOADING: Fresh Animations - FreshAnimations_....zip...
@@ -66,6 +69,9 @@ python main.py
 
 # Or with arguments (fully non-interactive)
 python main.py -c YyGKtxlz -v 26.2 -l fabric -u
+
+# Include prerelease-only projects in the collection
+python main.py -c YyGKtxlz -v 26.2 -l fabric -u --allow-prerelease
 ```
 
 ## 📋 Command-Line Options
@@ -83,15 +89,20 @@ options:
                         Directory to download mods to. Default: "./mods"
   -u, --update          Download and update existing mods. Default: true
   --no-update           Do not update existing mods
+  --channel {release,beta,alpha}
+                        Allowed version channels. Default: release only.
+                        beta allows release then beta; alpha allows all.
+  --allow-prerelease    Allow beta/alpha when no release exists (same as --channel alpha)
 ```
 
-**Note:** All arguments except `-d` are optional. Missing values are prompted; loader defaults to fabric if you press Enter. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs.
+**Note:** All arguments are optional. Missing collection, version, loader, or update values are prompted; loader defaults to fabric if you press Enter. Interactive runs also ask about prerelease fallback, including the piped oneliner. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs, which default to release only. `--channel` and `--allow-prerelease` are mutually exclusive and skip the prerelease question.
 
 ## How It Works
 
 - **Dependencies**: Automatically downloads required dependencies recursively. Marked with `[DEPENDENCY]` in logs.
 - **Parallel Downloads**: Downloads up to 5 mods concurrently.
 - **Updates**: Enabled by default. Skips mods already at latest version by comparing filenames.
+- **Version channels**: By default only **release** versions are downloaded, even when a newer alpha exists. Use `--channel beta` or `--channel alpha` to allow prerelease fallbacks, or `--allow-prerelease` for non-interactive runs.
 - **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`)
 
 ## Tests
