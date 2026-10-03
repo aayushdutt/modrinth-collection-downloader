@@ -55,6 +55,46 @@ class TestParseArgs(unittest.TestCase):
             self.assertEqual(error.exception.code, 2)
             prompt.assert_not_called()
 
+    def test_blank_required_answers_repeat_before_optional_prompts(self):
+        with patch("main.safe_input", side_effect=["", "  ", "YyGKtxlz", "\t", "", "26.2", "", "", ""]) as prompt, \
+                patch("sys.stdout", new_callable=io.StringIO) as output:
+            args = main.parse_args([])
+        self.assertEqual((args.collection, args.version, args.loader), ("YyGKtxlz", "26.2", "fabric"))
+        questions = [call.args[0] for call in prompt.call_args_list]
+        self.assertTrue(all("collection" in question for question in questions[:3]))
+        self.assertTrue(all("Minecraft version" in question for question in questions[3:6]))
+        self.assertIn("loader", questions[6])
+        self.assertEqual(output.getvalue().count("is required"), 4)
+
+    def test_explicit_empty_arguments_error_without_prompting(self):
+        for flag in ("-c", "-v", "-l"):
+            for value in ("", " \t "):
+                arguments = self.CLI_ARGS.copy()
+                arguments[arguments.index(flag) + 1] = value
+                with self.subTest(flag=flag, value=value), patch("main.safe_input") as prompt, \
+                        patch("sys.stderr", new_callable=io.StringIO) as output:
+                    with self.assertRaises(SystemExit) as error:
+                        main.parse_args(arguments)
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("must not be empty", output.getvalue())
+                    prompt.assert_not_called()
+
+    def test_closed_required_input_exits_without_api_requests(self):
+        client = Mock()
+        with patch("main.safe_input", side_effect=["", EOFError()]) as prompt, \
+                patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(main.main([], client), 1)
+        self.assertEqual(prompt.call_count, 2)
+        self.assertIn("Collection ID or URL is required, but input ended", output.getvalue())
+        self.assertEqual(client.mock_calls, [])
+
+    def test_piped_terminal_eof_is_not_an_empty_answer(self):
+        with patch("sys.stdin.isatty", return_value=False), \
+                patch("builtins.open", return_value=io.StringIO("")), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaises(EOFError):
+                main.safe_input("Required value: ")
+
 
 class TestExtractCollectionId(unittest.TestCase):
     def test_plain_id(self):
@@ -102,8 +142,8 @@ class TestGetExistingMods(unittest.TestCase):
             open(os.path.join(tmp, "foo-bar.LQ3K71Q1.jar"), "w").close()
             mods = main.get_existing_mods(tmp)
             self.assertIn("LQ3K71Q1", mods)
-            self.assertEqual(mods["LQ3K71Q1"]["filename"], "foo-bar.LQ3K71Q1.jar")
-            self.assertEqual(mods["LQ3K71Q1"]["directory"], os.path.abspath(tmp))
+            self.assertEqual(mods["LQ3K71Q1"][0]["filename"], "foo-bar.LQ3K71Q1.jar")
+            self.assertEqual(mods["LQ3K71Q1"][0]["directory"], os.path.abspath(tmp))
 
     def test_empty_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +159,7 @@ class TestDefaultResourcepacksDirectory(unittest.TestCase):
 
 
 class TestMergeExistingMods(unittest.TestCase):
-    def test_merges_both_directories_resourcepacks_win_on_conflict(self):
+    def test_merges_both_directories_retaining_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             mods_dir = os.path.join(tmp, "mods")
             packs_dir = os.path.join(tmp, "resourcepacks")
@@ -130,10 +170,10 @@ class TestMergeExistingMods(unittest.TestCase):
             open(os.path.join(packs_dir, "moved.AAAA1111.zip"), "w").close()
 
             merged = main.merge_existing_mods(mods_dir, packs_dir)
-            self.assertEqual(merged["BBBB2222"]["filename"], "pack.BBBB2222.zip")
-            self.assertEqual(merged["BBBB2222"]["directory"], os.path.abspath(packs_dir))
-            self.assertEqual(merged["AAAA1111"]["filename"], "moved.AAAA1111.zip")
-            self.assertEqual(merged["AAAA1111"]["directory"], os.path.abspath(packs_dir))
+            self.assertEqual(merged["BBBB2222"][0]["filename"], "pack.BBBB2222.zip")
+            self.assertEqual(merged["BBBB2222"][0]["directory"], os.path.abspath(packs_dir))
+            self.assertEqual(merged["AAAA1111"][1]["filename"], "moved.AAAA1111.zip")
+            self.assertEqual(merged["AAAA1111"][1]["directory"], os.path.abspath(packs_dir))
 
 
 class TestVersionMatchesLoader(unittest.TestCase):
@@ -222,21 +262,14 @@ class TestSelectVersion(unittest.TestCase):
         self.assertEqual(got["id"], "rel-new")
 
 
-class TestGetLatestVersion(unittest.TestCase):
-    class _FakeClient:
-        def __init__(self, versions):
-            self._versions = versions
-
-        def get_mod_version(self, mod_id):
-            return self._versions
-
+class TestVersionCompatibility(unittest.TestCase):
     def test_picks_matching_fabric_mod(self):
         versions = [
             {"game_versions": ["26.2"], "loaders": ["forge"]},
             {"game_versions": ["26.2"], "loaders": ["fabric"], "id": "ok"},
         ]
-        got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
+        got = main.select_version(
+            versions, "26.2", "fabric", "mod", "release"
         )
         self.assertEqual(got["id"], "ok")
 
@@ -245,8 +278,8 @@ class TestGetLatestVersion(unittest.TestCase):
             {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "alpha", "id": "alpha"},
             {"game_versions": ["26.2"], "loaders": ["fabric"], "version_type": "release", "id": "rel"},
         ]
-        got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
+        got = main.select_version(
+            versions, "26.2", "fabric", "mod", "release"
         )
         self.assertEqual(got["id"], "rel")
 
@@ -254,8 +287,8 @@ class TestGetLatestVersion(unittest.TestCase):
         versions = [
             {"game_versions": ["26.2"], "loaders": ["minecraft"], "id": "pack"},
         ]
-        got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "resourcepack", "release"
+        got = main.select_version(
+            versions, "26.2", "fabric", "resourcepack", "release"
         )
         self.assertEqual(got["id"], "pack")
 
@@ -263,70 +296,10 @@ class TestGetLatestVersion(unittest.TestCase):
         versions = [
             {"game_versions": ["26.2"], "loaders": ["minecraft"]},
         ]
-        got = main.get_latest_version(
-            self._FakeClient(versions), "x", "26.2", "fabric", "mod", "release"
+        got = main.select_version(
+            versions, "26.2", "fabric", "mod", "release"
         )
         self.assertIsNone(got)
-
-
-class TestDownloadDependencies(unittest.TestCase):
-    def test_channel_policy_reaches_nested_dependencies_and_skipped_mods(self):
-        def version(project_id, channel, dependency=None):
-            return {
-                "id": project_id + "-version",
-                "version_type": channel,
-                "game_versions": ["26.2"],
-                "loaders": ["fabric"],
-                "dependencies": (
-                    [{"project_id": dependency, "dependency_type": "required"}]
-                    if dependency else []
-                ),
-                "files": [{"primary": True, "filename": project_id + ".jar", "url": project_id}],
-            }
-
-        versions = {
-            "parent": [version("parent", "release", "dep")],
-            "dep": [version("dep", "beta", "nested")],
-            "nested": [version("nested", "alpha")],
-        }
-        for update in (True, False):
-            for channel, expected_deps in (
-                ("release", []), ("beta", ["dep"]), ("alpha", ["dep", "nested"])
-            ):
-                with self.subTest(update=update, channel=channel), tempfile.TemporaryDirectory() as tmp:
-                    mods_dir = os.path.join(tmp, "mods")
-                    os.makedirs(mods_dir)
-                    parent_filename = "parent.parent.jar" if update else "installed.parent.jar"
-                    parent_path = os.path.join(mods_dir, parent_filename)
-                    if not update:
-                        with open(parent_path, "wb") as installed:
-                            installed.write(b"original")
-
-                    def download(url, filename):
-                        with open(filename, "wb") as target:
-                            target.write(b"downloaded")
-                        return True
-
-                    client = Mock(spec=main.ModrinthClient)
-                    client.get_mod_project.side_effect = lambda pid: {"title": pid, "project_type": "mod"}
-                    client.get_mod_version.side_effect = versions.__getitem__
-                    client.download_file.side_effect = download
-                    stats = {"downloaded": 0, "updated": 0, "skipped": 0, "failed": 0}
-                    failed = []
-                    with patch("sys.stdout", new_callable=io.StringIO):
-                        main.download_mod(
-                            "parent", client, mods_dir, os.path.join(tmp, "resourcepacks"),
-                            "26.2", "fabric", update, main.get_existing_mods(mods_dir),
-                            stats, failed, max_channel=channel,
-                        )
-                    self.assertEqual(
-                        set(os.listdir(mods_dir)),
-                        {parent_filename} | {pid + "." + pid + ".jar" for pid in expected_deps},
-                    )
-                    self.assertEqual(failed, {"release": ["dep"], "beta": ["nested"], "alpha": []}[channel])
-                    self.assertEqual(stats["failed"], len(failed))
-                    with open(parent_path, "rb") as installed:
-                        self.assertEqual(installed.read(), b"downloaded" if update else b"original")
 
 
 if __name__ == "__main__":

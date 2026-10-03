@@ -50,9 +50,10 @@ Update existing mods? [Y/n] (default: Y):
 Allow prerelease (beta/alpha) when no release is available? [y/N]: y
 Found 4 mod(s) in collection
 Version channel policy: alpha
-Processing 1 required dependency(ies) for Litematica...
-  [DEPENDENCY] DOWNLOADING: MaLiLib - malilib-....jar...
-DOWNLOADING: Fresh Animations - FreshAnimations_....zip...
+PREPARING: MaLiLib (...) - ...
+PREPARING: Litematica (...) - ...
+PREPARING: Fresh Animations (...) - ...
+DOWNLOADED: ...
 ...
 ```
 
@@ -87,6 +88,8 @@ options:
   -l, --loader LOADER   Loader to use (e.g., "fabric", "forge", "quilt"). Default: "fabric"
   -d, --directory DIRECTORY
                         Directory to download mods to. Default: "./mods"
+  --resourcepacks-directory DIRECTORY
+                        Resource-pack destination. Default: sibling resourcepacks/ directory
   -u, --update          Download and update existing mods. Default: true
   --no-update           Do not update existing mods
   --channel {release,beta,alpha}
@@ -97,19 +100,35 @@ options:
 
 **Note:** All arguments are optional. Missing collection, version, loader, or update values are prompted; loader defaults to fabric if you press Enter. Interactive runs also ask about prerelease fallback, including the piped oneliner. Pass `-c`, `-v`, `-l`, and `-u`/`--no-update` for fully non-interactive runs, which default to release only. `--channel` and `--allow-prerelease` are mutually exclusive and skip the prerelease question.
 
+Collection and Minecraft version have no defaults: blank answers repeat those prompts, and closing input exits with an error. Enter accepts the defaults for loader, update preference, and prerelease fallback. Explicitly empty `-c`, `-v`, or `-l` arguments are rejected before prompting.
+
 ## How It Works
 
-- **Dependencies**: Automatically downloads required dependencies recursively. Marked with `[DEPENDENCY]` in logs.
+- **Metadata planning**: Looks up independent project/version metadata with up to five network workers. Shared project and exact-version requests are reused across dependency graph passes. The coordinator selects versions, checks dependency constraints, and reports progress before installation starts.
+- **Planning progress**: Before downloads start, shows collection project counts, metadata lookups, required-version lookups, and installed-file checks. Progress is flushed immediately, including when output is piped. Network retries are announced, and the finished plan reports elapsed time and any resolution errors.
+- **Dependencies**: Resolves required dependencies before installation, including exact `version_id` pins and references with only a version ID. A shared dependency is downloaded once per run. Conflicting pins or unavailable required dependencies fail their connected group of projects; parent files are not installed. Cyclic required dependencies fail explicitly.
 - **Parallel Downloads**: Downloads up to 5 mods concurrently.
-- **Updates**: Enabled by default. Skips mods already at latest version by comparing filenames.
-- **Version channels**: By default only **release** versions are downloaded, even when a newer alpha exists. Use `--channel beta` or `--channel alpha` to allow prerelease fallbacks, or `--allow-prerelease` for non-interactive runs.
-- **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`)
+- **Updates**: Enabled by default. Verifies installed files before skipping or replacing them. Downloads go to temporary files, are checked against available size/hash metadata, and replace the destination atomically; failed downloads preserve the previous installation. Recognized older files and misplaced resource-pack duplicates are removed after a successful replacement. Unrecognized local files are preserved.
+- **Installation transactions**: Projects linked by required dependencies are staged as one group before any installed files change. Verified installed versions also link projects in that group, so a failed parent update preserves its previous dependencies. A staging failure preserves the whole group's current files. A filesystem failure during installation rolls the group back; unrelated groups can still finish. Persistent disk errors can prevent full rollback; the error prints a retained `modrinth-recovery-*` directory containing originals and an `originals/original-paths.json` recovery map (or a retained staging directory if recovery creation fails). Keep those backups and restore affected files before retrying.
+- **No updates**: `--no-update` keeps installed project versions and resolves their own requirements. If the installed version cannot be identified and verified from Modrinth metadata, the project fails rather than borrowing dependencies from a newer version.
+- **Version channels**: By default only **release** versions are downloaded, even when a newer alpha exists. Use `--channel beta` or `--channel alpha` to allow prerelease fallbacks, or `--allow-prerelease` for non-interactive runs. Exact dependency pins must also satisfy this channel policy and the requested Minecraft version/loader.
+- **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`). Collection resource packs go to the sibling `resourcepacks/` directory unless overridden, including packs also required by another collection project. Other dependencies go to `mods/`.
+- **Failures**: Returns a nonzero process exit status when the collection cannot be read or a project cannot be resolved, verified, or installed. Unrelated valid projects may still finish. Network requests use timeouts and bounded retries for transient failures.
 
 ## Tests
 
+The suite lives in `tests/`. Offline tests use a local HTTP server and temporary directories to test real CLI processes, dependency resolution, safe updates, failed downloads, and exit statuses. They require Python 3.9+; CI runs them on Python 3.9 and 3.13. No external packages or live Modrinth access are needed.
+
 ```bash
-python3 -m unittest test_main -v   # unit (offline)
-python3 -m unittest test_e2e -v    # e2e (hits Modrinth)
+python3 -m unittest discover -s tests -t . -v
+# Run only the HTTP/CLI integration tests
+python3 -m unittest tests.test_cli -v
+```
+
+Live tests are opt-in because the public collection and API can change. They download actual artifacts into temporary directories and bound each downloader subprocess to 180 seconds:
+
+```bash
+MCD_LIVE_TESTS=1 python3 -m unittest tests.test_e2e -v
 ```
 
 ## Requirements
@@ -122,7 +141,9 @@ python3 -m unittest test_e2e -v    # e2e (hits Modrinth)
 - **"command not found: python"**: Use `python3` instead, or [install Python](https://www.python.org/downloads/).
 - **"No version found"**: Mod doesn't support the specified version/loader. Check Modrinth for supported versions.
 - **"Collection not found"**: Verify the collection ID/URL is correct and public.
-- **Dependencies not downloading**: Only "required" dependencies are downloaded. Optional ones are skipped.
+- **Dependencies not downloading**: Only "required" dependencies are downloaded. Optional ones are skipped. An unavailable or conflicting required dependency blocks its parent; read the failure summary before retrying.
+- **Download verification failed**: The destination is left unchanged. Retry after checking your connection and the upstream artifact.
+- **Installed version cannot be identified**: `--no-update` needs verified metadata for the installed version. Back up unfamiliar files before removing them or enabling updates.
 
 ## Star History
 

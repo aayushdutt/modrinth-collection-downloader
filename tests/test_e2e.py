@@ -7,11 +7,12 @@ Downloads once, then asserts install layout, dependency resolution,
 idempotent update/skip behavior, and resource-pack migration.
 
 Run:
-  python3 -m unittest test_e2e -v
+  MCD_LIVE_TESTS=1 python3 -m unittest tests.test_e2e -v
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -22,7 +23,9 @@ import time
 import unittest
 from urllib import error, request
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+from main import ModrinthClient
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_COLLECTION = "YyGKtxlz"
 MC_VERSION = "26.2"
 LOADER = "fabric"
@@ -30,7 +33,10 @@ API = "https://api.modrinth.com"
 
 
 def _api_get(path: str):
-    with request.urlopen(f"{API}{path}", timeout=20) as resp:
+    api_request = request.Request(
+        f"{API}{path}", headers={"User-Agent": ModrinthClient.USER_AGENT}
+    )
+    with request.urlopen(api_request, timeout=20) as resp:
         return json.loads(resp.read())
 
 
@@ -40,6 +46,19 @@ def _files(directory: str) -> list[str]:
     return sorted(
         f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))
     )
+
+
+def _snapshot(directory: str) -> dict:
+    """Compare installed bytes and mtimes, independently of status log wording."""
+    snapshot = {}
+    for filename in _files(directory):
+        path = os.path.join(directory, filename)
+        digest = hashlib.sha512()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        snapshot[filename] = (os.stat(path).st_mtime_ns, digest.hexdigest())
+    return snapshot
 
 
 def _has_project(files: list[str], project_id: str) -> bool:
@@ -67,7 +86,10 @@ def _select_expected_version(versions: list, project_type: str):
 
 
 def _expected_filename(version: dict, project_id: str) -> str:
-    primary = next(file for file in version["files"] if file.get("primary"))
+    primary = next(
+        (file for file in version["files"] if file.get("primary")),
+        version["files"][0],
+    )
     stem, extension = os.path.splitext(primary["filename"])
     return f"{stem}.{project_id}{extension}"
 
@@ -76,6 +98,10 @@ def _log(msg: str) -> None:
     print(f"  {msg}", flush=True)
 
 
+@unittest.skipUnless(
+    os.environ.get("MCD_LIVE_TESTS") == "1",
+    "live Modrinth tests require MCD_LIVE_TESTS=1",
+)
 class TestE2ECollectionDownload(unittest.TestCase):
     """Single live download against collection YyGKtxlz, then all assertions."""
 
@@ -91,7 +117,7 @@ class TestE2ECollectionDownload(unittest.TestCase):
             self.skipTest(f"Collection {TEST_COLLECTION} has no projects")
 
         projects = {}
-        required_dep_ids = set()
+        required_refs = []
         needs_prerelease = False
         for project_id in project_ids:
             project = _api_get(f"/v2/project/{project_id}")
@@ -114,21 +140,47 @@ class TestE2ECollectionDownload(unittest.TestCase):
             }
             _log(f"found {title} ({project_type}) -> {match.get('version_number')}")
             for dep in match.get("dependencies") or []:
-                if dep.get("dependency_type") == "required" and dep.get("project_id"):
-                    required_dep_ids.add(dep["project_id"])
+                if dep.get("dependency_type") == "required":
+                    required_refs.append(dep)
 
         required_deps = {}
-        for dep_id in sorted(required_dep_ids):
-            project = _api_get(f"/v2/project/{dep_id}")
-            versions = _api_get(f"/v2/project/{dep_id}/version")
-            match = _select_expected_version(
-                versions, project.get("project_type") or "mod"
-            )
+        resolved_dep_versions = {}
+        while required_refs:
+            dependency = required_refs.pop(0)
+            dep_id = dependency.get("project_id")
+            pinned_id = dependency.get("version_id")
+            if pinned_id:
+                match = _api_get(f"/v2/version/{pinned_id}")
+                dep_id = dep_id or match["project_id"]
+                project = _api_get(f"/v2/project/{dep_id}")
+                if not _version_matches(match, project.get("project_type") or "mod"):
+                    self.skipTest(f"Pinned dependency {pinned_id} is incompatible")
+            elif dep_id:
+                project = _api_get(f"/v2/project/{dep_id}")
+                versions = _api_get(f"/v2/project/{dep_id}/version")
+                match = _select_expected_version(
+                    versions, project.get("project_type") or "mod"
+                )
+            else:
+                self.skipTest("Collection contains an unidentified required dependency")
             if match is None:
                 self.skipTest(f"No compatible version for required dependency {dep_id}")
+            if dep_id in resolved_dep_versions:
+                if resolved_dep_versions[dep_id] != match["id"]:
+                    self.skipTest(f"Live fixture mixes version requirements for {dep_id}")
+                continue
+            resolved_dep_versions[dep_id] = match["id"]
             if (match.get("version_type") or "release") != "release":
                 needs_prerelease = True
             required_deps[dep_id] = _expected_filename(match, dep_id)
+            # A dependency pin can also determine a collection project's version.
+            if dep_id in projects:
+                projects[dep_id]["version"] = match
+                projects[dep_id]["filename"] = required_deps[dep_id]
+            required_refs.extend(
+                dep for dep in match.get("dependencies") or []
+                if dep.get("dependency_type") == "required"
+            )
 
         channel_flag = ["--allow-prerelease"] if needs_prerelease else ["--channel", "release"]
         if needs_prerelease:
@@ -183,9 +235,11 @@ class TestE2ECollectionDownload(unittest.TestCase):
                     f"expected pack {projects[project_id]['title']} ({project_id}) in resourcepacks/: {packs}",
                 )
             for dep_id, expected_filename in required_deps.items():
+                # Explicit collection resource packs retain their root placement.
+                expected_files = packs if dep_id in pack_ids else mods
                 self.assertIn(
-                    expected_filename, mods,
-                    f"expected required dependency {dep_id} in mods/: {mods}",
+                    expected_filename, expected_files,
+                    f"expected required dependency {dep_id}: {expected_files}",
                 )
             self.assertFalse(
                 any(name.lower().endswith(".zip") for name in mods),
@@ -194,15 +248,14 @@ class TestE2ECollectionDownload(unittest.TestCase):
             self.assertIn("SUMMARY", first.stdout)
 
             # --- 2) Idempotent update: no re-downloads ---
-            before_mods = set(mods)
-            before_packs = set(packs)
+            before_mods = _snapshot(mods_dir)
+            before_packs = _snapshot(packs_dir)
             second = self._run(
                 "2/4 update (expect skips)", mods_dir, packs_dir, *channel_flag, "-u"
             )
             self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
-            self.assertNotIn("DOWNLOADING:", second.stdout)
-            self.assertEqual(set(_files(mods_dir)), before_mods)
-            self.assertEqual(set(_files(packs_dir)), before_packs)
+            self.assertEqual(_snapshot(mods_dir), before_mods)
+            self.assertEqual(_snapshot(packs_dir), before_packs)
 
             # --- 3) --no-update leaves files untouched ---
             third = self._run(
@@ -213,11 +266,8 @@ class TestE2ECollectionDownload(unittest.TestCase):
                 "--no-update",
             )
             self.assertEqual(third.returncode, 0, msg=third.stdout + third.stderr)
-            self.assertNotIn("DOWNLOADING:", third.stdout)
-            self.assertNotIn("UPDATING:", third.stdout)
-            self.assertNotIn("MOVED:", third.stdout)
-            self.assertEqual(set(_files(mods_dir)), before_mods)
-            self.assertEqual(set(_files(packs_dir)), before_packs)
+            self.assertEqual(_snapshot(mods_dir), before_mods)
+            self.assertEqual(_snapshot(packs_dir), before_packs)
 
             # --- 4) Migrate pack that was left under mods/ ---
             pack_id = pack_ids[0]
@@ -246,9 +296,9 @@ class TestE2ECollectionDownload(unittest.TestCase):
                 _has_project(_files(mods_dir), pack_id),
                 _files(mods_dir),
             )
-            self.assertTrue(
-                ("MOVED:" in fourth.stdout) or ("REMOVED:" in fourth.stdout),
-                fourth.stdout,
+            self.assertEqual(
+                _snapshot(packs_dir)[pack_name][1], before_packs[pack_name][1],
+                "migration must preserve the pack bytes",
             )
             _log("all e2e assertions passed")
         finally:
@@ -281,24 +331,22 @@ class TestE2ECollectionDownload(unittest.TestCase):
             stderr=subprocess.STDOUT,
             text=True,
         )
-        lines: list[str] = []
         try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                lines.append(line)
-                sys.stdout.write(f"    {line}")
-                sys.stdout.flush()
-            returncode = proc.wait(timeout=180)
+            output, _ = proc.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+            self.fail(f"{label} exceeded 180s; output:\n{output}")
         finally:
-            if proc.stdout is not None:
-                proc.stdout.close()
             if proc.poll() is None:
                 proc.kill()
-                proc.wait()
+                proc.communicate()
+        for line in output.splitlines():
+            _log(f"  {line}")
         elapsed = time.monotonic() - started
-        _log(f"--- {label} done in {elapsed:.1f}s (exit {returncode}) ---")
+        _log(f"--- {label} done in {elapsed:.1f}s (exit {proc.returncode}) ---")
         return subprocess.CompletedProcess(
-            cmd, returncode, stdout="".join(lines), stderr=""
+            cmd, proc.returncode, stdout=output, stderr=""
         )
 
 
