@@ -18,12 +18,12 @@ class TestParseArgs(unittest.TestCase):
                 "sys.stdin.isatty", return_value=terminal
             ), patch("main.safe_input") as prompt:
                 args = main.parse_args(self.CLI_ARGS)
-                self.assertEqual(args.channel, "release")
+                self.assertEqual(args.channel, "beta")
                 prompt.assert_not_called()
 
-    def test_interactive_prerelease_choice_works_with_piped_stdin(self):
+    def test_interactive_alpha_choice_works_with_piped_stdin(self):
         for terminal in (True, False):
-            for answer, expected in (("y", "alpha"), ("", "release")):
+            for answer, expected in (("y", "alpha"), ("", "beta")):
                 with self.subTest(terminal=terminal, answer=answer), patch(
                     "sys.stdin.isatty", return_value=terminal
                 ), patch(
@@ -33,9 +33,9 @@ class TestParseArgs(unittest.TestCase):
                     self.assertEqual(args.channel, expected)
                     self.assertEqual(args.loader, "fabric")
                     self.assertTrue(args.update)
-                    self.assertIn("prerelease", prompt.call_args[0][0])
+                    self.assertIn("alpha", prompt.call_args[0][0])
 
-    def test_explicit_channel_skips_prerelease_prompt(self):
+    def test_explicit_channel_skips_alpha_prompt(self):
         for flags, expected in (
             (["--channel", "release"], "release"),
             (["--channel", "beta"], "beta"),
