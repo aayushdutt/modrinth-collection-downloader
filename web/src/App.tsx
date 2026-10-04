@@ -29,7 +29,7 @@ export default function App() {
   const [onlyProblems, setOnlyProblems] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
-  const { plan, checked, resolving, throttled, error: resolveError } = usePlan(
+  const { plan, ready: planReady, checked, resolving, throttled, error: resolveError } = usePlan(
     loaded,
     gameVersion,
     loader,
@@ -41,7 +41,7 @@ export default function App() {
   const projects = useMemo(() => (loaded ? projectsOf(loaded) : []), [loaded]);
   const roots = useMemo(() => loaded?.collection.projects ?? [], [loaded]);
   const items = useMemo(() => [...installSet(plan, roots, skipped)].map((id) => plan.get(id)!), [plan, roots, skipped]);
-  const jobs = useMemo(() => jobsFor(items), [items]);
+  const jobs = useMemo(() => planReady ? jobsFor(items) : [], [items, planReady]);
   const totalBytes = jobs.reduce((n, j) => n + j.item.file.size, 0);
   const nameOf = useCallback(
     (id: string) => plan.get(id)?.project?.title ?? loaded?.projects.get(id)?.title ?? id,
@@ -50,8 +50,8 @@ export default function App() {
 
   const flow = useInstallFlow(jobs, `${slugify(loaded?.collection.name ?? "")}-${gameVersion}-${loader}.zip`);
   const { reset: resetFlow } = flow;
-  // A new plan makes the last run's results stale.
-  useEffect(() => resetFlow(), [plan, resetFlow]);
+  // Clear pending folder confirmations as soon as the target changes.
+  useEffect(() => resetFlow(), [plan, gameVersion, loader, allowAlpha, resetFlow]);
 
   useShareUrl(loaded && { collection: loaded.collection.id, gameVersion, loader, allowAlpha });
 
@@ -156,7 +156,7 @@ export default function App() {
               <InstallActions
                 flow={flow}
                 jobCount={jobs.length}
-                ready={!resolving && jobs.length > 0}
+                ready={planReady && !opening && jobs.length > 0}
                 tooBigForZip={!fitsInZip(jobs)}
               />
             </div>

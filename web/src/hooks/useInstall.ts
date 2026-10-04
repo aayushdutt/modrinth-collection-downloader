@@ -9,6 +9,7 @@ export function useInstall() {
   const [stage, setStage] = useState<Stage>("downloading");
   const [stopped, setStopped] = useState(false);
   const [progress, setProgress] = useState<Record<string, ItemProgress>>({});
+  const [recovery, setRecovery] = useState<string[]>([]);
   const live = useRef<Record<string, ItemProgress>>({});
   const frame = useRef(0);
   const controller = useRef<AbortController | null>(null);
@@ -34,6 +35,7 @@ export function useInstall() {
       controller.current = abort;
       live.current = {};
       setProgress({});
+      setRecovery([]);
       setStopped(false);
       setStage("downloading");
       setPhase("running");
@@ -48,6 +50,7 @@ export function useInstall() {
           flush();
         },
         onStage: setStage,
+        onRecovery: (directory) => setRecovery((previous) => [...previous, directory]),
       };
       try {
         return await task(events, abort.signal);
@@ -69,8 +72,9 @@ export function useInstall() {
     controller.current?.abort();
     live.current = {};
     setProgress({});
+    setRecovery([]);
     setPhase("idle");
   }, []);
 
-  return { phase, stage, stopped, progress, run, stop, reset };
+  return { phase, stage, stopped, progress, recovery, run, stop, reset };
 }

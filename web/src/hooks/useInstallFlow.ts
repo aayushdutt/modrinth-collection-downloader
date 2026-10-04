@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { installToFolder, installToZip, type Job, type Target } from "../lib/install";
 import { useInstall } from "./useInstall";
 
@@ -19,6 +19,8 @@ function saveBlob(blob: Blob, name: string) {
  * a folder without mods/) and remembers how the last run ended.
  */
 export function useInstallFlow(jobs: Job[], zipName: string) {
+  const currentJobs = useRef(jobs);
+  useLayoutEffect(() => { currentJobs.current = jobs; }, [jobs]);
   const install = useInstall();
   const [target, setTarget] = useState<Target>("zip");
   const [savedAs, setSavedAs] = useState<string | null>(null);
@@ -31,6 +33,7 @@ export function useInstallFlow(jobs: Job[], zipName: string) {
   };
 
   async function installInto(root: FileSystemDirectoryHandle, modsOnly = false) {
+    if (currentJobs.current !== jobs || !jobs.length) return;
     clearNotes();
     setTarget("folder");
     try {
@@ -49,6 +52,7 @@ export function useInstallFlow(jobs: Job[], zipName: string) {
       if (!isAbort(e)) setNote("The browser blocked that folder. Try another, or use the zip.");
       return;
     }
+    if (currentJobs.current !== jobs) return;
     if (root.name === "mods") {
       // Fine when there's nothing to put next to mods/.
       if (jobs.every((j) => j.item.folder === "mods")) return installInto(root, true);
@@ -59,6 +63,7 @@ export function useInstallFlow(jobs: Job[], zipName: string) {
       () => true,
       () => false,
     );
+    if (currentJobs.current !== jobs) return;
     if (hasMods) await installInto(root);
     else setPendingRoot(root);
   }

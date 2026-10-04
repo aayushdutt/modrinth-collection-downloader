@@ -80,6 +80,8 @@ export function usePlan(
   const current = Boolean(loaded) && resolved.key.startsWith(`${loaded!.openedAt}|`);
   return {
     plan: key && current ? resolved.plan : NO_PLAN,
+    /** Only a successful plan for this exact target may be installed. */
+    ready: Boolean(key) && resolved.key === key && !error,
     checked: checked.key === key ? checked.count : 0,
     resolving: Boolean(key) && resolved.key !== key && !error,
     /** Modrinth is rate limiting this pass; large collections slow down. */

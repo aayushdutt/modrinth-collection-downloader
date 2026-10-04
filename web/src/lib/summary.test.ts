@@ -90,4 +90,13 @@ describe("installResult", () => {
     );
     expect(installResult({ target: "zip", stopped: true, savedAs: null, progress: {} })).toBe("Stopped. Nothing saved.");
   });
+
+  it("reports incomplete rollback instead of claiming nothing changed, even after Stop", () => {
+    for (const stopped of [false, true]) {
+      expect(installResult({ target: "folder", stopped, savedAs: null,
+        progress: progress("failed"), recovery: [".minecraft/.modrinth-backup-test"] })).toBe(
+        "Installation needs recovery. Some files could not be restored.",
+      );
+    }
+  });
 });

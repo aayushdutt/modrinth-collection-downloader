@@ -63,13 +63,13 @@ export async function getProjects(projectIds: string[], signal?: AbortSignal) {
 const versionCache = new Map<string, Promise<Version[]>>();
 
 /** Versions of a project for one game version, newest first. */
-export function getProjectVersions(projectId: string, gameVersion: string, signal?: AbortSignal) {
-  const key = `${projectId}@${gameVersion}`;
+export function getProjectVersions(projectId: string, gameVersion?: string, signal?: AbortSignal) {
+  const key = `${projectId}@${gameVersion ?? "*"}`;
   let cached = versionCache.get(key);
   if (!cached) {
     // Not tied to one caller's signal: a cancelled pass shouldn't poison the cache.
     cached = get<Version[]>(
-      `/v2/project/${encodeURIComponent(projectId)}/version?game_versions=${ids([gameVersion])}`,
+      `/v2/project/${encodeURIComponent(projectId)}/version${gameVersion ? `?game_versions=${ids([gameVersion])}` : ""}`,
     );
     cached.catch(() => versionCache.delete(key));
     versionCache.set(key, cached);

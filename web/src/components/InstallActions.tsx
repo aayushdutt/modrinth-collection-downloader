@@ -61,10 +61,15 @@ export function InstallActions({
             <strong>"{flow.pendingRoot.name}"</strong> has no mods folder. Install here anyway?
           </p>
           <div className="flex flex-wrap gap-[calc(var(--s)*2)]">
-            <button type="button" className="mc-button text-[15px]" onClick={() => flow.installInto(flow.pendingRoot!)}>
+            <button
+              type="button"
+              className="mc-button text-[15px]"
+              disabled={!ready}
+              onClick={() => flow.installInto(flow.pendingRoot!)}
+            >
               Install here
             </button>
-            <button type="button" className="mc-button text-[15px]" onClick={flow.chooseFolder}>
+            <button type="button" className="mc-button text-[15px]" disabled={!ready} onClick={flow.chooseFolder}>
               Pick another
             </button>
           </div>

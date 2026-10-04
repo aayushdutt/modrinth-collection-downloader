@@ -90,13 +90,16 @@ export function installResult({
   stopped,
   progress,
   savedAs,
+  recovery = [],
 }: {
   target: Target;
   stopped: boolean;
   progress: Record<string, ItemProgress>;
   savedAs: string | null;
+  recovery?: string[];
 }) {
   const count = (...states: ItemProgress["state"][]) => countStates(progress, ...states);
+  if (target === "folder" && recovery.length) return "Installation needs recovery. Some files could not be restored.";
   if (stopped) {
     if (target === "zip") return "Stopped. Nothing saved.";
     const saved = count("added", "updated");

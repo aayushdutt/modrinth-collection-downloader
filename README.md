@@ -1,18 +1,20 @@
 # Modrinth Collection Downloader
 
-> Download and update mods from Modrinth collections with automatic dependency resolution and parallel downloads.
+> Download and update mods and packs from Modrinth collections with automatic dependency resolution and parallel downloads.
+
+[**Open the web app**](https://modrinth-collection-downloader.vercel.app/) · [**Use the Python CLI**](#interactive-oneliner)
 
 [![Python](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A fast, user-friendly Python script that downloads mods from Modrinth collections with intelligent dependency handling, parallel downloads, and an intuitive interactive interface.
+Use the hosted web app without installing anything, or run the standalone Python script from your terminal. Both resolve required dependencies, prefer stable releases, and download files in parallel.
 
 ## ✨ Features
 
 - 🚀 **Parallel Downloads** - Download multiple mods simultaneously for faster processing
 - 🔗 **Automatic Dependencies** - Automatically resolves and downloads required dependencies
-- 💬 **Interactive Mode** - User-friendly prompts with sensible defaults
-- 🔄 **Smart Updates** - Updates existing mods by default (configurable)
+- 🌐 **Browser App** - Download a zip or install into a game folder, with shareable collection/version/loader links
+- 💬 **Interactive CLI** - User-friendly prompts with sensible defaults, or command-line arguments for automation
+- 🔄 **Smart Updates** - Replaces recognized older files; the CLI also supports keeping installed versions with `--no-update`
 - 📊 **Detailed Statistics** - Comprehensive summary with separate tracking for mods and dependencies
 
 > Also check out my new project [mctui](https://github.com/aayushdutt/mctui) - the TUI launcher for Minecraft. Minimal, fast launcher with mod management and other batteries built in.
@@ -21,14 +23,20 @@ A fast, user-friendly Python script that downloads mods from Modrinth collection
 
 ### In your browser
 
-The web UI in [`web/`](web/) does the same thing without Python. Paste a collection link, pick a version and loader, then:
+Open [modrinth-collection-downloader.vercel.app](https://modrinth-collection-downloader.vercel.app/). Paste a **public** Modrinth collection link or ID, choose a Minecraft version and loader, and review the files and dependency warnings before downloading. The app suggests a target based on the collection's supported versions and loaders.
 
-- **Download zip** (any browser): every file, laid out as `mods/`, `resourcepacks/` and `shaderpacks/`.
-- **Install into folder** (Chrome, Edge): writes straight into your game folder, replaces older versions, and recognises mods you installed by hand so you don't end up with duplicates.
+- **Download zip** (modern browsers): selected compatible files, laid out as `mods/`, `resourcepacks/` and `shaderpacks/`. Extract the archive and copy each folder's files into the matching folder in your game instance. Remove older copies of those mods first.
+- **Install into folder** (desktop Chrome or Edge when folder access is available): choose your game instance folder, the one containing `mods/`. The app writes files into their matching folders and replaces recognized older versions. It can identify hand-installed `.jar` and `.zip` files through Modrinth's hash lookup. A `mods/` folder can also be selected directly when all files are mods.
 
-It runs entirely in the browser against the Modrinth API, and every file is checked against Modrinth's SHA-512. Links are shareable: `?c=YyGKtxlz&v=26.2&l=fabric` reopens that exact setup.
+The app runs entirely in your browser and fetches metadata and downloads directly from Modrinth. Downloads are checked against Modrinth's SHA-512 when provided. Mods, resource packs, and shaders are supported; modpacks need a launcher. Minecraft and the mod loader must already be installed.
 
-To run it locally: `cd web && pnpm install && pnpm dev`. To deploy on Vercel, import the repo and set the project's Root Directory to `web`.
+Releases are preferred, with betas as a fallback. Check **Use alphas when there's no release or beta** to allow alpha builds too. Click **Share** to copy the current collection, Minecraft version, loader, and alpha setting; individual skipped files are not included. For example: [open the sample setup](https://modrinth-collection-downloader.vercel.app/?c=YyGKtxlz&v=26.2&l=fabric). Add `&pre=1` to allow alphas. If a shared target is unsupported by the collection, the app selects a supported target instead.
+
+On macOS, the folder picker may block `~/Library`, where the default launcher stores Minecraft; use the zip for that location. Folder installs download and verify all files before committing each dependency group. A failed download leaves its group unchanged; a write failure or Stop during a commit rolls that group back. Independent groups that already completed remain installed.
+
+The installer backs up affected files in a temporary `.modrinth-backup-*` directory inside the selected folder. Successful installs and rollbacks remove that backup. If a disk error prevents full rollback, the app shows the retained backup's location; restore its files using `original-paths.json` before retrying. The map records each affected path relative to the selected folder; a `null` value marks a newly created file to remove during recovery. Installed-file identification errors stop installation before files change.
+
+For local development and Vercel configuration, see [Web Development and Deployment](#web-development-and-deployment).
 
 ### Interactive oneliner
 
@@ -117,7 +125,7 @@ options:
 
 Collection and Minecraft version have no defaults: blank answers repeat those prompts, and closing input exits with an error. Enter accepts the defaults for loader, update preference, and alpha fallback. Explicitly empty `-c`, `-v`, or `-l` arguments are rejected before prompting.
 
-## How It Works
+## How the CLI Works
 
 - **Metadata planning**: Looks up independent project/version metadata with up to five network workers. Shared project and exact-version requests are reused across dependency graph passes. The coordinator selects versions, checks dependency constraints, and reports progress before installation starts.
 - **Planning progress**: Before downloads start, shows collection project counts, metadata lookups, required-version lookups, and installed-file checks. Progress is flushed immediately, including when output is piped. Network retries are announced, and the finished plan reports elapsed time and any resolution errors.
@@ -130,9 +138,49 @@ Collection and Minecraft version have no defaults: blank answers repeat those pr
 - **File Format**: Saves as `filename.modid.ext` (e.g., `dynamic-fps-....LQ3K71Q1.jar`). Collection resource packs go to the sibling `resourcepacks/` directory unless overridden, including packs also required by another collection project. Other dependencies go to `mods/`.
 - **Failures**: Returns a nonzero process exit status when the collection cannot be read or a project cannot be resolved, verified, or installed. Unrelated valid projects may still finish. Network requests use timeouts and bounded retries for transient failures.
 
+## Web Development and Deployment
+
+The web app lives in [`web/`](web/) and uses React, TypeScript, Vite, and Tailwind CSS. Use Node.js 24 (also used in CI) and the pnpm version pinned in [`web/package.json`](web/package.json), currently `10.33.2`.
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+To create and preview the production build:
+
+```bash
+pnpm build
+pnpm preview
+```
+
+The build output is `web/dist/`. No backend or environment variables are required.
+
+To deploy your own copy on Vercel, import the repository and set:
+
+| Setting | Value |
+| --- | --- |
+| Root Directory | `web` |
+| Framework Preset | Vite |
+| Install Command | `pnpm install --frozen-lockfile` |
+| Build Command | `pnpm build` |
+| Output Directory | `dist` |
+
+[`web/vercel.json`](web/vercel.json) sets immutable caching for the generated assets.
+
 ## Tests
 
-The suite lives in `tests/`. Offline tests use a local HTTP server and temporary directories to test real CLI processes, dependency resolution, safe updates, failed downloads, and exit statuses. They require Python 3.9+; CI runs them on Python 3.9 and 3.13. No external packages or live Modrinth access are needed.
+Web checks run offline with mocked downloads, an in-memory folder API, and DOM integration tests for install controls:
+
+```bash
+cd web
+pnpm test
+pnpm lint
+pnpm build
+```
+
+The Python suite lives in `tests/`; run it from the repository root. Offline tests use a local HTTP server and temporary directories to test real CLI processes, dependency resolution, safe updates, failed downloads, and exit statuses. They require Python 3.9+; CI runs them on Python 3.9 and 3.13. No external packages or live Modrinth access are needed. CI also runs the web tests, lint, and production build on Node.js 24.
 
 ```bash
 python3 -m unittest discover -s tests -t . -v
@@ -148,16 +196,19 @@ MCD_LIVE_TESTS=1 python3 -m unittest tests.test_e2e -v
 
 ## Requirements
 
-- Python 3.6+
-- No external dependencies (uses standard library only)
+- **Hosted web app**: a modern browser; direct folder installation requires browser support for the File System Access API.
+- **Python CLI**: Python 3.6+, with no external dependencies (standard library only).
+- **Web development**: Node.js and pnpm as described above.
 
 ## Troubleshooting
 
 - **"command not found: python"**: Use `python3` instead, or [install Python](https://www.python.org/downloads/).
 - **"No version found"**: Mod doesn't support the specified version/loader. Check Modrinth for supported versions.
 - **"Collection not found"**: Verify the collection ID/URL is correct and public.
+- **"Install into folder" is missing**: Use desktop Chrome or Edge with folder access support, or download a zip.
+- **Modpacks in a collection**: The web app leaves these out; install them through your launcher.
 - **Dependencies not downloading**: Only "required" dependencies are downloaded. Optional ones are skipped. An unavailable or conflicting required dependency blocks its parent; read the failure summary before retrying.
-- **Download verification failed**: The destination is left unchanged. Retry after checking your connection and the upstream artifact.
+- **Download verification failed**: That dependency group's files are left unchanged. Retry after checking your connection and the upstream artifact. Independent groups that already completed remain installed.
 - **Installed version cannot be identified**: `--no-update` needs verified metadata for the installed version. Back up unfamiliar files before removing them or enabling updates.
 
 ## Star History

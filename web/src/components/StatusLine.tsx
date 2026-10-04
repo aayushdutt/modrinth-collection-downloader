@@ -63,9 +63,11 @@ export function StatusLine({
       <p>
         {flow.stage === "scanning"
           ? "Checking your folder…"
-          : flow.stage === "packing"
-            ? "Building the zip…"
-            : `Downloading ${done} of ${jobCount} (${formatBytes(Math.min(bytes, totalBytes))} of ${formatBytes(totalBytes)})`}
+          : flow.stage === "installing"
+            ? "Installing verified files…"
+            : flow.stage === "packing"
+              ? "Building the zip…"
+              : `Downloading ${done} of ${jobCount} (${formatBytes(Math.min(bytes, totalBytes))} of ${formatBytes(totalBytes)})`}
       </p>
     );
   } else if (flow.phase === "done") {
@@ -75,6 +77,11 @@ export function StatusLine({
     content = (
       <>
         <p className="font-bold">{installResult(flow)}</p>
+        {flow.recovery.map((directory) => (
+          <p key={directory} className="text-danger">
+            Original files are in <code>{directory}</code>. Restore them using <code>original-paths.json</code> before retrying.
+          </p>
+        ))}
         {flow.target === "zip" && flow.savedAs && (
           <p>
             Unzip it and copy each folder's files into the same folder in your game (mods into mods). Remove older

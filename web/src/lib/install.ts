@@ -1,10 +1,11 @@
-import { getVersionsByHash, pool } from "./modrinth";
+import { getProjectVersions, getVersions, getVersionsByHash, pool } from "./modrinth";
 import { fileNameWithId, idFromFileName, type Folder, type PlanItem } from "./resolve";
+import type { Version } from "./types";
 import { crc32, zip, ZIP_LIMIT, type ZipEntry } from "./zip";
 
 export type Outcome = "added" | "updated" | "current" | "kept" | "failed" | "stopped";
 export type JobState = "waiting" | "downloading" | Outcome;
-export type Stage = "scanning" | "downloading" | "packing";
+export type Stage = "scanning" | "downloading" | "installing" | "packing";
 export type Target = "folder" | "zip";
 
 export interface ItemProgress {
@@ -22,6 +23,7 @@ export interface InstallEvents {
   onState(id: string, state: JobState, error?: string): void;
   onBytes(id: string, delta: number): void;
   onStage?(stage: Stage): void;
+  onRecovery?(directory: string): void;
 }
 
 export const FOLDERS: Folder[] = ["mods", "resourcepacks", "shaderpacks"];
@@ -197,69 +199,147 @@ const byTitle = (jobs: Job[], id: string) => jobs.find((j) => j.item.id === id)?
 interface Existing {
   folder: Folder;
   name: string;
-  /** Set when the file was identified by its hash rather than its name. */
-  versionId?: string;
+  file: File;
+  version: Version;
 }
 
 /**
- * Find what's already installed for each project. Files this tool (or the
- * CLI) wrote carry the project id in their name; anything else is identified
- * by asking Modrinth about its SHA-1, so hand-installed copies aren't
- * duplicated (two copies of a mod stop the game from starting).
+ * Identify every copy by hash. A damaged managed file is only recognized
+ * when its complete name matches a file actually published by that project.
+ * A project ID in an unrelated filename is never enough to delete it.
  */
 async function indexFolder(
   root: FileSystemDirectoryHandle,
   modsOnly: boolean,
-  wanted: Set<string>,
+  jobs: Job[],
   signal: AbortSignal,
 ) {
   const index = new Map<string, Existing[]>();
   const add = (id: string, entry: Existing) => index.set(id, [...(index.get(id) ?? []), entry]);
-  const unknown: { folder: Folder; handle: FileSystemFileHandle }[] = [];
+  const wanted = new Map(jobs.map((job) => [job.item.id, job]));
+  const targets = new Map(jobs.map((job) => [`${job.item.folder}/${job.name}`, job.item.id]));
+  const files: { folder: Folder; name: string; file: File }[] = [];
 
   for (const folder of modsOnly ? (["mods"] as Folder[]) : FOLDERS) {
     let dir: FileSystemDirectoryHandle;
     try {
       dir = modsOnly ? root : await root.getDirectoryHandle(folder);
-    } catch {
-      continue;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "NotFoundError") continue;
+      throw e;
     }
     for await (const handle of dir.values()) {
       if (handle.kind !== "file") continue;
-      const id = idFromFileName(handle.name);
-      if (id && wanted.has(id)) add(id, { folder, name: handle.name });
-      else if (/\.(jar|zip)$/i.test(handle.name)) unknown.push({ folder, handle: handle as FileSystemFileHandle });
+      if (/\.(jar|zip)$/i.test(handle.name)) {
+        files.push({ folder, name: handle.name, file: await (handle as FileSystemFileHandle).getFile() });
+      }
     }
   }
 
-  if (unknown.length) {
-    const hashes = new Map<string, Existing>();
-    await pool(unknown, 4, async ({ folder, handle }) => {
+  if (files.length) {
+    const hashes = new Map<string, typeof files>();
+    await pool(files, 4, async (entry) => {
       if (signal.aborted) return;
-      const file = await handle.getFile();
-      if (file.size > 512 * 1024 * 1024) return;
-      hashes.set(await digest("SHA-1", await file.arrayBuffer()), { folder, name: handle.name });
+      if (entry.file.size > 512 * 1024 * 1024) return;
+      const hash = await digest("SHA-1", await entry.file.arrayBuffer());
+      hashes.set(hash, [...(hashes.get(hash) ?? []), entry]);
     });
     signal.throwIfAborted();
-    try {
-      const found = await getVersionsByHash([...hashes.keys()], signal);
-      for (const [hash, version] of Object.entries(found)) {
-        const entry = hashes.get(hash);
-        if (entry && wanted.has(version.project_id)) add(version.project_id, { ...entry, versionId: version.id });
+    // If identification fails, stop before writing: installing alongside an
+    // unidentified hand-installed copy could leave a broken game instance.
+    const found = await getVersionsByHash([...hashes.keys()], signal);
+    const identified = new Set<(typeof files)[number]>();
+    for (const [hash, version] of Object.entries(found)) {
+      for (const entry of hashes.get(hash) ?? []) {
+        const owner = targets.get(`${entry.folder}/${entry.name}`);
+        if (owner && owner !== version.project_id) {
+          throw new Error(`${entry.name} belongs to another Modrinth project. Move it before installing.`);
+        }
+        identified.add(entry);
+        if (wanted.has(version.project_id)) add(version.project_id, { ...entry, version });
       }
-    } catch (e) {
-      if (signal.aborted) throw e;
-      // Without the lookup, files named the usual way are still handled.
+    }
+
+    const candidates = files.filter((entry) => !identified.has(entry) && wanted.has(idFromFileName(entry.name) ?? ""));
+    const published = new Map<string, Version[]>();
+    await pool([...new Set(candidates.map((entry) => idFromFileName(entry.name)!))], 4, async (id) => {
+      const job = wanted.get(id)!;
+      const older = candidates.some((entry) => idFromFileName(entry.name) === id && entry.name !== job.name);
+      published.set(id, older ? await getProjectVersions(id, undefined, signal) : []);
+    });
+    for (const entry of candidates) {
+      const id = idFromFileName(entry.name)!;
+      const job = wanted.get(id)!;
+      const version = entry.name === job.name
+        ? job.item.version
+        : published.get(id)?.find((v) => v.files.some((file) => fileNameWithId(file.filename, id) === entry.name));
+      if (version) add(id, { ...entry, version });
     }
   }
   return index;
 }
 
+/** Include installed requirements too, even when an update removes that edge. */
+async function folderGroups(jobs: Job[], index: Map<string, Existing[]>, signal: AbortSignal) {
+  const versionIds = [...new Set([...index.values()].flatMap((entries) => entries.flatMap((entry) =>
+    entry.version.dependencies.filter((d) => d.dependency_type === "required" && !d.project_id && d.version_id)
+      .map((d) => d.version_id!),
+  )))];
+  const exact = new Map((await getVersions(versionIds, signal)).map((version) => [version.id, version.project_id]));
+  const neighbors = new Map(jobs.map((job) => [job.item.id, new Set<string>()]));
+  for (const job of jobs) {
+    const dependencies = new Set(job.item.deps);
+    for (const entry of index.get(job.item.id) ?? []) {
+      for (const dep of entry.version.dependencies) {
+        if (dep.dependency_type !== "required") continue;
+        const owner = dep.project_id ?? (dep.version_id && exact.get(dep.version_id));
+        if (!owner) throw new Error(`Couldn't identify an installed dependency of ${job.item.project?.title ?? job.item.id}.`);
+        dependencies.add(owner);
+      }
+    }
+    for (const dep of dependencies) {
+      if (!neighbors.has(dep)) continue;
+      neighbors.get(job.item.id)!.add(dep);
+      neighbors.get(dep)!.add(job.item.id);
+    }
+  }
+  const byId = new Map(jobs.map((job) => [job.item.id, job]));
+  const groups: Job[][] = [];
+  const remaining = new Set(byId.keys());
+  while (remaining.size) {
+    const pending = [remaining.values().next().value!];
+    const group: Job[] = [];
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (!remaining.delete(id)) continue;
+      group.push(byId.get(id)!);
+      pending.push(...neighbors.get(id)!);
+    }
+    groups.push(dependencyOrder(group));
+  }
+  return groups;
+}
+
+async function writeFile(dir: FileSystemDirectoryHandle, name: string, data: Blob) {
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  try {
+    await writable.write(data);
+    await writable.close();
+  } catch (e) {
+    // Release the writer's lock before attempting rollback.
+    await writable.abort().catch(() => {});
+    throw e;
+  }
+}
+
+const missing = (e: unknown) => e instanceof DOMException && e.name === "NotFoundError";
+
 /**
  * Install into a game folder that holds mods/, resourcepacks/ and shaderpacks/
- * (or, with `modsOnly`, straight into a mods folder). Files already at the
- * planned version are left alone; older versions are replaced, or kept when
- * `replace` is off.
+ * (or, with `modsOnly`, straight into a mods folder). Each dependency group
+ * is fully staged before changing files. Commit failures restore the group;
+ * originals remain in a recovery directory if disk errors prevent rollback.
  */
 export async function installToFolder(
   root: FileSystemDirectoryHandle,
@@ -268,7 +348,21 @@ export async function installToFolder(
   events: InstallEvents,
 ) {
   events.onStage?.("scanning");
-  const index = await indexFolder(root, modsOnly, new Set(jobs.map((j) => j.item.id)), signal);
+  for (const job of jobs) events.onState(job.item.id, "waiting");
+  if (signal.aborted) {
+    for (const job of jobs) events.onState(job.item.id, "stopped");
+    return;
+  }
+  let index: Map<string, Existing[]>;
+  let groups: Job[][];
+  try {
+    index = await indexFolder(root, modsOnly, jobs, signal);
+    groups = await folderGroups(jobs, index, signal);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    for (const job of jobs) events.onState(job.item.id, signal.aborted ? "stopped" : "failed", reason);
+    throw e;
+  }
   events.onStage?.("downloading");
 
   const dirs = new Map<Folder, Promise<FileSystemDirectoryHandle>>();
@@ -277,49 +371,156 @@ export async function installToFolder(
     if (!dirs.has(folder)) dirs.set(folder, root.getDirectoryHandle(folder, { create: true }));
     return dirs.get(folder)!;
   };
-  const remove = async (entries: Existing[]) => {
-    for (const old of entries) await (await dir(old.folder)).removeEntry(old.name);
-  };
-
-  /** Whether a file on disk really is the planned file, not just named like it. */
-  const intact = async (entry: Existing, file: Job["item"]["file"]) => {
-    if (entry.versionId) return true; // Identified by its hash already.
-    const data = await (await (await dir(entry.folder)).getFileHandle(entry.name)).getFile();
+  const intact = async (data: File, file: Job["item"]["file"]) => {
     if (data.size !== file.size) return false;
     const expected = file.hashes.sha1 ?? file.hashes.sha512;
     if (!expected) return true;
     return (await digest(file.hashes.sha1 ? "SHA-1" : "SHA-512", await data.arrayBuffer())) === expected;
   };
 
-  await run(jobs, events, signal, async (job) => {
-    const { folder, id, file, version } = job.item;
-    const previous = index.get(id) ?? [];
-    const candidate = previous.find((p) => p.folder === folder && (p.name === job.name || p.versionId === version.id));
-    const current = candidate && (await intact(candidate, file)) ? candidate : undefined;
-    if (current) {
-      // Tidy up stray older copies sitting next to the current one.
-      if (replace) await remove(previous.filter((p) => p !== current));
-      events.onBytes(id, file.size);
-      return "current";
-    }
-    if (previous.length && !replace) {
-      events.onBytes(id, file.size);
-      return "kept";
-    }
+  interface Staged {
+    outcome: Outcome;
+    data?: Blob;
+    remove: Existing[];
+    error?: string;
+  }
+  const staged = new Map<string, Staged>();
+  await pool(jobs, 4, async (job) => {
+    try {
+      signal.throwIfAborted();
+      const { folder, id, file, version } = job.item;
+      const previous = index.get(id) ?? [];
+      const candidate = previous.find((p) => p.folder === folder && (p.name === job.name || p.version.id === version.id));
+      const current = candidate && (await intact(candidate.file, file)) ? candidate : undefined;
+      if (current) {
+        events.onBytes(id, file.size);
+        staged.set(id, { outcome: "current", remove: replace ? previous.filter((p) => p !== current) : [] });
+        return;
+      }
+      if (previous.length && !replace) {
+        events.onBytes(id, file.size);
+        staged.set(id, { outcome: "kept", remove: [] });
+        return;
+      }
 
-    events.onState(id, "downloading");
-    const data = await fetchVerified(job, events, signal);
-    signal.throwIfAborted(); // Don't change the folder after Stop.
-    const handle = await (await dir(folder)).getFileHandle(job.name, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(data);
-    await writable.close();
-
-    // Only remove old versions once the new one is safely on disk. A damaged
-    // copy with the same name was just overwritten, so it isn't removed.
-    await remove(previous.filter((p) => !(p.folder === folder && p.name === job.name)));
-    return previous.length ? "updated" : "added";
+      events.onState(id, "downloading");
+      const data = await fetchVerified(job, events, signal);
+      staged.set(id, {
+        outcome: previous.length ? "updated" : "added", data: new Blob([data]),
+        remove: previous.filter((p) => !(p.folder === folder && p.name === job.name)),
+      });
+    } catch (e) {
+      staged.set(job.item.id, { outcome: signal.aborted || isAbort(e) ? "stopped" : "failed", remove: [],
+        error: e instanceof Error ? e.message : String(e) });
+    }
   });
+
+  events.onStage?.("installing");
+  for (const group of groups) {
+    const failure = group.find((job) => ["failed", "stopped"].includes(staged.get(job.item.id)!.outcome));
+    if (failure || signal.aborted) {
+      for (const job of group) events.onState(job.item.id, signal.aborted ? "stopped" : "failed",
+        failure ? `${byTitle(jobs, failure.item.id)}: ${staged.get(failure.item.id)!.error}` : undefined);
+      for (const job of group) staged.delete(job.item.id);
+      continue;
+    }
+
+    const paths = new Map<string, { folder: Folder; name: string; original: File | null }>();
+    const remember = (folder: Folder, name: string) => paths.set(`${folder}/${name}`, { folder, name, original: null });
+    for (const job of group) {
+      const pending = staged.get(job.item.id)!;
+      if (pending.data) remember(job.item.folder, job.name);
+      for (const old of pending.remove) remember(old.folder, old.name);
+    }
+    const backupName = `.modrinth-backup-${crypto.randomUUID()}`;
+    let backedUp = false;
+    const changed = new Set<string>();
+    let backupCreated = false;
+    let backup: FileSystemDirectoryHandle | undefined;
+    try {
+      for (const path of paths.values()) {
+        try {
+          const source = modsOnly ? root : await root.getDirectoryHandle(path.folder);
+          path.original = await (await source.getFileHandle(path.name)).getFile();
+        } catch (e) {
+          if (!missing(e)) throw e;
+        }
+      }
+      if (paths.size) {
+        backup = await root.getDirectoryHandle(backupName, { create: true });
+        backupCreated = true;
+        const manifest: Record<string, string | null> = {};
+        for (const [key, path] of paths) {
+          const relative = modsOnly ? path.name : key;
+          manifest[relative] = path.original ? relative : null;
+          if (path.original) {
+            const target = modsOnly ? backup : await backup.getDirectoryHandle(path.folder, { create: true });
+            await writeFile(target, path.name, path.original);
+          }
+        }
+        await writeFile(backup, "original-paths.json", new Blob([JSON.stringify(manifest, null, 2)]));
+        backedUp = true;
+      }
+      signal.throwIfAborted();
+      for (const job of group) {
+        const pending = staged.get(job.item.id)!;
+        if (pending.data) {
+          const target = await dir(job.item.folder);
+          changed.add(`${job.item.folder}/${job.name}`);
+          await writeFile(target, job.name, pending.data);
+          signal.throwIfAborted();
+        }
+      }
+      // All replacement files are installed before any older copy is removed.
+      for (const job of group) {
+        for (const old of staged.get(job.item.id)!.remove) {
+          const target = await dir(old.folder);
+          changed.add(`${old.folder}/${old.name}`);
+          await target.removeEntry(old.name);
+          signal.throwIfAborted();
+        }
+      }
+      for (const job of group) events.onState(job.item.id, staged.get(job.item.id)!.outcome);
+    } catch (e) {
+      const rollbackErrors: string[] = [];
+      if (changed.size && backedUp) {
+        for (const [key, path] of paths) {
+          if (!changed.has(key)) continue;
+          try {
+            if (path.original) {
+              // getFile() snapshots can become unreadable once the source is
+              // changed. Restore from the durable backup, not the old File.
+              const source = modsOnly ? backup! : await backup!.getDirectoryHandle(path.folder);
+              const original = await (await source.getFileHandle(path.name)).getFile();
+              await writeFile(await dir(path.folder), path.name, original);
+            } else {
+              try { await (await dir(path.folder)).removeEntry(path.name); }
+              catch (removeError) { if (!missing(removeError)) throw removeError; }
+            }
+          } catch {
+            rollbackErrors.push(key);
+          }
+        }
+      }
+      const reason = e instanceof Error ? e.message : String(e);
+      const error = rollbackErrors.length
+        ? `${reason}. Rollback incomplete for ${rollbackErrors.join(", ")}. Originals retained in ${root.name}/${backupName}; see original-paths.json.`
+        : changed.size ? `Installation rolled back: ${reason}` : reason;
+      for (const job of group) events.onState(job.item.id,
+        signal.aborted && !rollbackErrors.length ? "stopped" : "failed", error);
+      // Keep the on-disk originals when rollback could not restore all paths.
+      if (rollbackErrors.length) {
+        backupCreated = false;
+        events.onRecovery?.(`${root.name}/${backupName}`);
+      }
+    } finally {
+      if (backupCreated) {
+        try { await root.removeEntry(backupName, { recursive: true }); }
+        catch { /* A leftover backup is safe; never remove originals to tidy it. */ }
+      }
+      for (const job of group) staged.delete(job.item.id);
+    }
+  }
 }
 
 /**
