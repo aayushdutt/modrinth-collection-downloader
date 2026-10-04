@@ -19,6 +19,17 @@ A fast, user-friendly Python script that downloads mods from Modrinth collection
 
 ## 🚀 Quick Start
 
+### In your browser
+
+The web UI in [`web/`](web/) does the same thing without Python. Paste a collection link, pick a version and loader, then:
+
+- **Download zip** (any browser): every file, laid out as `mods/`, `resourcepacks/` and `shaderpacks/`.
+- **Install into folder** (Chrome, Edge): writes straight into your game folder, replaces older versions, and recognises mods you installed by hand so you don't end up with duplicates.
+
+It runs entirely in the browser against the Modrinth API, and every file is checked against Modrinth's SHA-512. Links are shareable: `?c=YyGKtxlz&v=26.2&l=fabric` reopens that exact setup.
+
+To run it locally: `cd web && pnpm install && pnpm dev`. To deploy on Vercel, import the repo and set the project's Root Directory to `web`.
+
 ### Interactive oneliner
 
 The easiest way to use the script - just run it and follow the prompts:
