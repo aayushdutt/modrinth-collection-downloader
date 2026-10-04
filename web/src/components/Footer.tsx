@@ -4,7 +4,7 @@ const REPO = "https://github.com/aayushdutt/modrinth-collection-downloader";
 
 const LINKS = [
   { href: REPO, label: "Source on GitHub" },
-  { href: `${REPO}#-quick-start`, label: "Command-line version" },
+  { href: `${REPO}#python-cli`, label: "Command-line version" },
   { href: "https://github.com/aayushdutt/mctui", label: "mctui launcher" },
 ];
 
