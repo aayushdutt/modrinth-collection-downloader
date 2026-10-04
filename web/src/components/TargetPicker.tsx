@@ -39,27 +39,27 @@ function Choice({
   );
 }
 
-/** Minecraft version, loader, and whether betas may fill gaps. */
+/** Minecraft version, loader, and whether alphas may fill gaps (betas always may). */
 export function TargetPicker({
   projects,
   tags,
   gameVersion,
   loader,
-  prerelease,
+  allowAlpha,
   disabled,
   onGameVersion,
   onLoader,
-  onPrerelease,
+  onAllowAlpha,
 }: {
   projects: Project[];
   tags: GameVersionTag[];
   gameVersion: string;
   loader: string;
-  prerelease: boolean;
+  allowAlpha: boolean;
   disabled: boolean;
   onGameVersion(version: string): void;
   onLoader(loader: string): void;
-  onPrerelease(on: boolean): void;
+  onAllowAlpha(on: boolean): void;
 }) {
   const total = installableCount(projects);
   const loaders = useMemo(() => loadersIn(projects), [projects]);
@@ -126,8 +126,8 @@ export function TargetPicker({
         </fieldset>
       )}
 
-      <Checkbox checked={prerelease} onChange={onPrerelease} disabled={disabled}>
-        Use betas when there's no release
+      <Checkbox checked={allowAlpha} onChange={onAllowAlpha} disabled={disabled}>
+        Use alphas when there's no release or beta
       </Checkbox>
     </div>
   );

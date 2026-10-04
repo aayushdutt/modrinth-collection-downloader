@@ -6,7 +6,7 @@ import type { PlanItem } from "./resolve";
 export interface SummaryLine {
   text: string;
   /** A one-click fix offered next to the line. */
-  action?: "show-problems" | "use-betas";
+  action?: "show-problems" | "allow-alphas";
 }
 
 /** A short account of what will be downloaded, and what won't and why. */
@@ -36,11 +36,12 @@ export function planSummary(
         ? { text: `Not available for ${where}: ${names(missing)}.` }
         : { text: `${missing.length} aren't available for ${where}.`, action: "show-problems" },
     );
-    const betas = missing.filter((i) => i.fallback).length;
-    if (betas) {
+    // With betas allowed by default, the only fallback left to offer is an alpha.
+    const alphas = missing.filter((i) => i.fallback === "alpha").length;
+    if (alphas) {
       lines.push({
-        text: betas === missing.length ? `${betas === 1 ? "It has" : "They have"} a beta.` : `${betas} have a beta.`,
-        action: "use-betas",
+        text: alphas === missing.length ? `${alphas === 1 ? "It has" : "They have"} an alpha.` : `${alphas} have an alpha.`,
+        action: "allow-alphas",
       });
     }
   }
@@ -68,8 +69,10 @@ export function planSummary(
   const gone = items.filter((i) => i.problem === "unavailable");
   if (gone.length) lines.push({ text: `${gone.length} no longer on Modrinth.` });
 
-  const pre = jobs.filter((j) => j.item.version.version_type !== "release").length;
-  if (pre) lines.push({ text: `${pre} ${pre === 1 ? "is a beta" : "are betas"}.` });
+  const betas = jobs.filter((j) => j.item.version.version_type === "beta").length;
+  const alphaJobs = jobs.filter((j) => j.item.version.version_type === "alpha").length;
+  if (betas) lines.push({ text: `${betas} ${betas === 1 ? "is a beta" : "are betas"}.` });
+  if (alphaJobs) lines.push({ text: `${alphaJobs} ${alphaJobs === 1 ? "is an alpha" : "are alphas"}.` });
 
   const neededSkips = [...skipped].filter((id) => items.some((i) => i.deps.includes(id)));
   if (neededSkips.length) lines.push({ text: `You skipped ${listOf(neededSkips.map(nameOf))}, which other mods need.` });

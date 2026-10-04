@@ -24,7 +24,7 @@ export default function App() {
   const { loaded, opening, error: openError, open } = useCollection();
   const [gameVersion, setGameVersion] = useState(shared.gameVersion);
   const [loader, setLoader] = useState(shared.loader);
-  const [prerelease, setPrerelease] = useState(shared.prerelease);
+  const [allowAlpha, setAllowAlpha] = useState(shared.allowAlpha);
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [onlyProblems, setOnlyProblems] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -33,7 +33,8 @@ export default function App() {
     loaded,
     gameVersion,
     loader,
-    prerelease ? "alpha" : "release",
+    // Betas fill gaps by default; alphas are riskier, so they're opt-in.
+    allowAlpha ? "alpha" : "beta",
     attempt,
   );
 
@@ -52,7 +53,7 @@ export default function App() {
   // A new plan makes the last run's results stale.
   useEffect(() => resetFlow(), [plan, resetFlow]);
 
-  useShareUrl(loaded && { collection: loaded.collection.id, gameVersion, loader, prerelease });
+  useShareUrl(loaded && { collection: loaded.collection.id, gameVersion, loader, allowAlpha });
 
   const openCollection = useCallback(
     (raw: string) =>
@@ -83,7 +84,7 @@ export default function App() {
 
   const onAction = (action: NonNullable<SummaryLine["action"]>) => {
     if (action === "show-problems") setOnlyProblems(true);
-    if (action === "use-betas") setPrerelease(true);
+    if (action === "allow-alphas") setAllowAlpha(true);
   };
 
   const busy = flow.phase === "running";
@@ -118,11 +119,11 @@ export default function App() {
               tags={tags}
               gameVersion={gameVersion}
               loader={loader}
-              prerelease={prerelease}
+              allowAlpha={allowAlpha}
               disabled={busy}
               onGameVersion={setGameVersion}
               onLoader={setLoader}
-              onPrerelease={setPrerelease}
+              onAllowAlpha={setAllowAlpha}
             />
           )}
           <PlanGrid

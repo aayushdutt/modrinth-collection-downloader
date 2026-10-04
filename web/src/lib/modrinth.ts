@@ -59,7 +59,7 @@ export async function getProjects(projectIds: string[], signal?: AbortSignal) {
 }
 
 // Loader and channel filtering happens locally, so caching by game version
-// makes switching loader or toggling betas instant.
+// makes switching loader or toggling alphas instant.
 const versionCache = new Map<string, Promise<Version[]>>();
 
 /** Versions of a project for one game version, newest first. */

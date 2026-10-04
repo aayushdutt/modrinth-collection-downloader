@@ -284,8 +284,9 @@ def parse_args(argv=None):
         choices=VERSION_CHANNELS,
         default=None,
         help=(
-            'Allowed version channels (release, beta, alpha). Default: "release" only. '
-            '"beta" allows release then beta; "alpha" allows all channels.'
+            'Allowed version channels (release, beta, alpha). Default: "beta" '
+            '(a release when one exists, otherwise a beta). "alpha" also allows alphas; '
+            '"release" allows releases only.'
         ),
     )
     channel_options.add_argument(
@@ -293,7 +294,7 @@ def parse_args(argv=None):
         dest="channel",
         action="store_const",
         const="alpha",
-        help="Allow beta/alpha versions when no release exists (same as --channel alpha).",
+        help="Also allow alpha versions when no release or beta exists (same as --channel alpha).",
     )
     args = parser.parse_args(argv)
     for field in ("collection", "version", "loader"):
@@ -329,13 +330,14 @@ def parse_args(argv=None):
         args.update = update_input not in ('n', 'no', 'false', '0')
     # If -u was provided, args.update is True; if --no-update was provided, it's False
 
+    # Betas fill gaps by default; alphas are riskier, so they're opt-in.
     if args.channel is None:
-        args.channel = "release"
+        args.channel = "beta"
         if interactive:
-            prerelease_input = safe_input(
-                "Allow prerelease (beta/alpha) when no release is available? [y/N]: "
+            alpha_input = safe_input(
+                "Allow alpha builds when no release or beta is available? [y/N]: "
             ).strip().lower()
-            if prerelease_input in ("y", "yes", "true", "1"):
+            if alpha_input in ("y", "yes", "true", "1"):
                 args.channel = "alpha"
 
     # Extract collection ID from URL if needed

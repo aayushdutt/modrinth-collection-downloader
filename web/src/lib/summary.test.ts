@@ -42,11 +42,11 @@ describe("planSummary", () => {
     expect(planSummary(items, jobsFor(items), new Set(), ctx)).toEqual([{ text: "2 files ready (2.0 MB)." }]);
   });
 
-  it("names a few missing projects and offers betas when they exist", () => {
-    const items = [item("a"), missing("b", { fallback: "beta" })];
+  it("names a few missing projects and offers alphas when they exist", () => {
+    const items = [item("a"), missing("b", { fallback: "alpha" })];
     expect(planSummary(items, jobsFor(items), new Set(), ctx).slice(1)).toEqual([
       { text: "Not available for 26.2 Fabric: B." },
-      { text: "It has a beta.", action: "use-betas" },
+      { text: "It has an alpha.", action: "allow-alphas" },
     ]);
   });
 

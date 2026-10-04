@@ -6,7 +6,7 @@ import { TextButton } from "./TextButton";
 
 const ACTIONS: Record<NonNullable<SummaryLine["action"]>, string> = {
   "show-problems": "Show them",
-  "use-betas": "Use betas",
+  "allow-alphas": "Use alphas",
 };
 
 /** One place that says what's happening: checking, the plan, progress, or the result. */
